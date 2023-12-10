@@ -200,11 +200,6 @@ fn force_color_vars(platform: &Platform) -> HashMap<String, String> {
     insert!(vars, "AM_COLOR_TESTS", "always");
     insert!(vars, "MAKE_TERMOUT", "1");
 
-    if !platform.is_windows() {
-        insert!(vars, "CXXFLAGS", "-fdiagnostics-color=always");
-        insert!(vars, "CFLAGS", "-fdiagnostics-color=always");
-    }
-
     vars
 }
 
