@@ -552,7 +552,7 @@ mod tests {
     fn test_correct_sha256() {
         let tmp = tmp("correct-sha");
         let rattler_build =
-            rattler().build::<_, _>(recipes().join("correct-sha"), tmp.as_dir(), None, None);
+            rattler().build(recipes().join("correct-sha"), tmp.as_dir(), None, None);
         assert!(rattler_build.status.success());
     }
 
@@ -560,14 +560,13 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn test_rpath() {
         let tmp = tmp("test_rpath");
-        let rattler_build = rattler().build::<_, _>(
+        let rattler_build = rattler().build(
             recipes().join("rpath"),
             tmp.as_dir(),
             None,
             Some("linux-64"),
         );
 
-        println!("{:?}", rattler_build);
         assert!(rattler_build.status.success());
     }
 }
