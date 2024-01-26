@@ -414,6 +414,10 @@ impl VariantConfig {
                 }
             }));
 
+            for k in parsed_recipe.build().variant().use_keys() {
+                used_vars.insert(k.to_string());
+            }
+
             let target_platform = if noarch_type.is_none() {
                 selector_config.target_platform
             } else {
@@ -615,6 +619,11 @@ impl VariantConfig {
                     // Be explicit about the other cases, so we can add them later
                     Dependency::Compiler(_) => (),
                 });
+
+                // remove all used vars that are ignored
+                for k in parsed_recipe.build().variant().ignore_keys() {
+                    used_variables.remove(k);
+                }
 
                 // actually used vars
                 let mut used_filtered = combination

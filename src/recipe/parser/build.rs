@@ -55,6 +55,9 @@ pub struct Build {
     /// Setting to control wether to always include a file (even if it is already present in the host env)
     #[serde(default, skip_serializing_if = "GlobVec::is_empty")]
     pub(super) always_include_files: GlobVec,
+
+    #[serde(default, skip_serializing_if = "Variant::is_default")]
+    pub(super) variant: Variant,
 }
 
 impl Build {
@@ -91,6 +94,10 @@ impl Build {
     /// Settings for shared libraries and executables
     pub const fn dynamic_linking(&self) -> Option<&DynamicLinking> {
         self.dynamic_linking.as_ref()
+    }
+
+    pub const fn variant(&self) -> &Variant {
+        &self.variant
     }
 
     /// Check if the build should be skipped.
@@ -465,5 +472,62 @@ impl TryConvertNode<EntryPoint> for RenderedScalarNode {
                 ErrorKind::EntryPointParsing(err),
             )]
         })
+    }
+}
+
+#[derive(Default, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
+/// Options that control which variables are used to compute the variant
+pub struct Variant {
+    /// Keys to forcibly use for the variant computation (even if they are not in the dependencies)
+    use_keys: Vec<String>,
+    /// Keys to always ignore for the variant computation (even if they are in the dependencies)
+    ignore_keys: Vec<String>,
+}
+
+impl Variant {
+    pub fn use_keys(&self) -> &[String] {
+        self.use_keys.as_slice()
+    }
+
+    pub fn ignore_keys(&self) -> &[String] {
+        self.ignore_keys.as_slice()
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.use_keys.is_empty() && self.ignore_keys.is_empty()
+    }
+}
+
+impl TryConvertNode<Variant> for RenderedNode {
+    fn try_convert(&self, name: &str) -> Result<Variant, Vec<PartialParsingError>> {
+        self.as_mapping()
+            .ok_or_else(|| vec![_partialerror!(*self.span(), ErrorKind::ExpectedMapping)])
+            .and_then(|m| m.try_convert(name))
+    }
+}
+
+impl TryConvertNode<Variant> for RenderedMappingNode {
+    fn try_convert(&self, _name: &str) -> Result<Variant, Vec<PartialParsingError>> {
+        let mut variant = Variant::default();
+
+        for (key, value) in self.iter() {
+            let key_str = key.as_str();
+            match key_str {
+                "use_keys" => {
+                    variant.use_keys = value.try_convert(key_str)?;
+                }
+                "ignore_keys" => {
+                    variant.ignore_keys = value.try_convert(key_str)?;
+                }
+                invalid => {
+                    return Err(vec![_partialerror!(
+                        *key.span(),
+                        ErrorKind::InvalidField(invalid.to_string().into()),
+                    )]);
+                }
+            }
+        }
+
+        Ok(variant)
     }
 }
