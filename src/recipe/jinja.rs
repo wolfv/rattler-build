@@ -1,9 +1,10 @@
 //! Module for types and functions related to miniJinja setup for recipes.
 
 use std::process::Command;
+use std::sync::Arc;
 use std::{collections::BTreeMap, str::FromStr};
 
-use minijinja::value::Object;
+use minijinja::value::{Object, StructObject};
 use minijinja::{Environment, Value};
 use rattler_conda_types::{PackageName, Version};
 
@@ -480,7 +481,7 @@ impl std::fmt::Display for Env {
 
 impl Object for Env {
     fn kind(&self) -> minijinja::value::ObjectKind<'_> {
-        minijinja::value::ObjectKind::Plain
+        minijinja::value::ObjectKind::Struct(self)
     }
 
     fn call_method(
@@ -514,7 +515,7 @@ impl Object for Env {
                     Ok(r) => Ok(Value::from(r)),
                     Err(e) => Err(minijinja::Error::new(
                         minijinja::ErrorKind::InvalidOperation,
-                        e.to_string(),
+                        format!("failed to get the environment variable `{key}`: {e}"),
                     )),
                 }
             }
@@ -580,6 +581,12 @@ impl Object for Env {
                 format!("object has no method named {name}"),
             )),
         }
+    }
+}
+
+impl StructObject for Env {
+    fn get_field(&self, name: &str) -> Option<Value> {
+        std::env::var(name).ok().map(Value::from)
     }
 }
 
