@@ -712,3 +712,22 @@ def test_read_only_removal(rattler_build: RattlerBuild, recipes: Path, tmp_path:
     pkg = get_extracted_package(tmp_path, "read-only-build-files")
 
     assert (pkg / "info/index.json").exists()
+
+def test_pydantic_true_false(rattler_build: RattlerBuild, recipes: Path, tmp_path: Path):
+    path_to_recipe = recipes / "if_else"
+    args = rattler_build.build_args(
+        path_to_recipe,
+        tmp_path,
+    )
+
+    output = rattler_build(*args, "--variant-config", recipes / "if_else/variant.yaml", "--render-only")
+    print(output)
+    # parse json
+    render = json.loads(output)
+
+    assert len(render) == 2
+    assert render[0]["recipe"]["package"]["name"] == "if_else_test"
+    assert render[0]["recipe"]["requirements"]["host"] == ['pydantic >=2', 'test']
+
+    assert render[1]["recipe"]["package"]["name"] == "if_else_test"
+    assert render[1]["recipe"]["requirements"]["host"] == ['pydantic >=1,<2', 'notest']
