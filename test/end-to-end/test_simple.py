@@ -875,3 +875,18 @@ def test_include_files(rattler_build: RattlerBuild, recipes: Path, tmp_path: Pat
     assert len(pp) == 2
     assert pp[0]["_path"] == "include/include_file.c"
     assert pp[1]["_path"] == "include/include_file.h"
+
+
+def test_nushell_implicit_recipe(
+    rattler_build: RattlerBuild, recipes: Path, tmp_path: Path
+):
+    rattler_build.build(
+        recipes / "nushell-implicit/recipe.yaml",
+        tmp_path,
+    )
+    pkg = get_extracted_package(tmp_path, "nushell")
+
+    assert (pkg / "info/paths.json").exists()
+    content = (pkg / "hello.txt").read_text()
+    # Windows adds quotes to the string so we just check with `in`
+    assert "Hello, world!" == content
