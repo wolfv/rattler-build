@@ -3,13 +3,14 @@
 We're using `rattler-build` to build a Rust package for the `cargo-edit` utility.
 This utility manages Cargo dependencies from the command line.
 
-To configure the Rust compiler, we add a `variant_config.yaml` file to the package:
+The typical Rust package is built using `cargo`, the Rust package manager.
+We recommend two arguments to the `cargo install` command:
 
-```yaml title="variant_config.yaml"
-rust_compiler: rust
-```
+- `--no-track` to avoid adding "tracking" information in the $PREFIX. Otherwise `cargo` installes a `.crates.toml` file in the $PREFIX which is useless, and would also be installed by other Rust packages.
+- `--locked` to ensure that the exact versions of the dependencies are used as specified in the `Cargo.lock` file.
+- `--root` to specify the installation directory, which should always be `${PREFIX}` (or `%PREFIX%` on Windows).
 
-This will tell `rattler-build` what to insert for the `${{ compiler('rust') }}` Jinja function.
+There are a number of example `rattler-build` recipes for Rust in the [`rust-forge` repository](https://github.com/wolfv/rust-forge).
 
 !!! note
     The `${{ compiler(...) }}` functions are very useful in the context of cross-compilation.
@@ -17,7 +18,6 @@ This will tell `rattler-build` what to insert for the `${{ compiler('rust') }}` 
     The "rendered" compiler will look like `rust_linux-64` when you are targeting the `linux-64` platform.
 
     You can read more about this in the [cross-compilation](../compilers.md) section.
-
 
 ```yaml title="recipe.yaml"
 context:
@@ -34,7 +34,7 @@ source:
 build:
   script:
     - cargo-bundle-licenses --format yaml --output ${SRC_DIR}/THIRDPARTY.yml  # !(1)
-    - $BUILD_PREFIX/bin/cargo install --locked --bins --root ${PREFIX} --path .
+    - $BUILD_PREFIX/bin/cargo install --no-track --locked --bins --root ${PREFIX} --path .
 
 requirements:
   build:
