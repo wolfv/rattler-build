@@ -33,6 +33,7 @@ pub mod rebuild;
 pub mod recipe_generator;
 mod unix;
 pub mod upload;
+mod variant_render;
 mod windows;
 
 use std::{
