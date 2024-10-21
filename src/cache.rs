@@ -16,7 +16,9 @@ use crate::{
     metadata::{build_reindexed_channels, Output},
     packaging::{contains_prefix_binary, contains_prefix_text, content_type, Files},
     recipe::parser::{Dependency, Requirements},
-    render::resolved_dependencies::{resolve_dependencies, FinalizedDependencies},
+    render::resolved_dependencies::{
+        install_environments, resolve_dependencies, FinalizedDependencies,
+    },
     source::copy_dir::{copy_file, create_symlink, CopyOptions},
 };
 
@@ -80,10 +82,10 @@ impl Output {
             // we are using the `host_platform` here because for the cache it should not
             // matter whether it's being build for `noarch` or not (one can have
             // mixed outputs, in fact).
-            selected_variant.insert("host_platform", self.host_platform().to_string());
+            selected_variant.insert("host_platform", self.host_platform().platform.to_string());
             selected_variant.insert(
                 "build_platform",
-                self.build_configuration.build_platform.to_string(),
+                self.build_configuration.build_platform.platform.to_string(),
             );
 
             let cache_key = (cache, selected_variant);
@@ -178,6 +180,10 @@ impl Output {
                     .await
                     .unwrap();
 
+            install_environments(self, &finalized_dependencies, tool_configuration)
+                .await
+                .into_diagnostic()?;
+
             cache
                 .build
                 .script()
@@ -187,6 +193,7 @@ impl Output {
                     &self.build_configuration.directories.recipe_dir,
                     &self.build_configuration.directories.host_prefix,
                     Some(&self.build_configuration.directories.build_prefix),
+                    None, // TODO fix this to be proper Jinja context
                 )
                 .await
                 .into_diagnostic()?;
@@ -274,7 +281,9 @@ fn replace_prefix(file: &Path, old_prefix: &Path, new_prefix: &Path) -> Result<(
         assert_eq!(
             new_prefix_bytes.len(),
             old_prefix_bytes.len(),
-            "Prefixes must have the same length"
+            "Prefixes must have the same length: {:?} != {:?}",
+            new_prefix,
+            old_prefix
         );
 
         let mut output = Vec::with_capacity(mmap.len());

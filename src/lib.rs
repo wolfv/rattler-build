@@ -31,10 +31,13 @@ mod post_process;
 pub mod rebuild;
 #[cfg(feature = "recipe-generation")]
 pub mod recipe_generator;
+mod run_exports;
 mod unix;
 pub mod upload;
 mod variant_render;
 mod windows;
+
+mod package_cache_reporter;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -56,8 +59,9 @@ use miette::IntoDiagnostic;
 use opt::*;
 use package_test::TestConfiguration;
 use petgraph::{algo::toposort, graph::DiGraph, visit::DfsPostOrder};
-use rattler_conda_types::{package::ArchiveType, Channel, Platform};
+use rattler_conda_types::{package::ArchiveType, Channel, GenericVirtualPackage, Platform};
 use rattler_solve::{ChannelPriority, SolveStrategy};
+use rattler_virtual_packages::{VirtualPackage, VirtualPackageOverrides};
 use recipe::{
     parser::{find_outputs_from_src, Dependency, Recipe},
     ParsingError,
@@ -66,6 +70,8 @@ use selectors::SelectorConfig;
 use system_tools::SystemTools;
 use tool_configuration::Configuration;
 use variant_config::{ParseErrors, VariantConfig};
+
+use crate::metadata::PlatformWithVirtualPackages;
 
 /// Returns the recipe path.
 pub fn get_recipe_path(path: &Path) -> miette::Result<PathBuf> {
@@ -138,11 +144,14 @@ pub async fn get_build_output(
     recipe_path: &Path,
     tool_config: &Configuration,
 ) -> miette::Result<Vec<Output>> {
-    let output_dir = args
+    let mut output_dir = args
         .common
         .output_dir
         .clone()
         .unwrap_or(current_dir().into_diagnostic()?.join("output"));
+    if output_dir.exists() {
+        output_dir = canonicalize(&output_dir).into_diagnostic()?;
+    }
     if output_dir.starts_with(
         recipe_path
             .parent()
@@ -155,16 +164,51 @@ pub async fn get_build_output(
 
     let recipe_text = fs::read_to_string(recipe_path).into_diagnostic()?;
 
-    if args.target_platform == Platform::NoArch || args.build_platform == Platform::NoArch {
+    if args.target_platform == Some(Platform::NoArch) || args.build_platform == Platform::NoArch {
         return Err(miette::miette!(
             "target-platform / build-platform cannot be `noarch` - that should be defined in the recipe"
         ));
     }
 
+    let mut host_platform = args.host_platform;
+    // If target_platform is not set, we default to the host platform
+    let target_platform = args.target_platform.unwrap_or(host_platform);
+    // If target_platform is set and host_platform is not, then we default
+    // host_platform to the target_platform
+    if let Some(target_platform) = args.target_platform {
+        // Check if `host_platform` is set by looking at the args (not ideal)
+        let host_platform_set = std::env::args().any(|arg| arg.starts_with("--host-platform"));
+        if !host_platform_set {
+            host_platform = target_platform
+        }
+    }
+
+    // Determine virtual packages of the system. These packages define the
+    // capabilities of the system. Some packages depend on these virtual
+    // packages to indicate compatibility with the hardware of the system.
+    let virtual_packages = tool_config
+        .fancy_log_handler
+        .wrap_in_progress("determining virtual packages", move || {
+            VirtualPackage::detect(&VirtualPackageOverrides::from_env()).map(|vpkgs| {
+                vpkgs
+                    .iter()
+                    .map(|vpkg| GenericVirtualPackage::from(vpkg.clone()))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .into_diagnostic()?;
+
+    tracing::debug!(
+        "Platforms: build: {}, host: {}, target: {}",
+        args.build_platform,
+        host_platform,
+        target_platform
+    );
+
     let selector_config = SelectorConfig {
         // We ignore noarch here
-        target_platform: args.target_platform,
-        host_platform: args.target_platform,
+        target_platform,
+        host_platform,
         hash: None,
         build_platform: args.build_platform,
         variant: BTreeMap::new(),
@@ -293,8 +337,14 @@ pub async fn get_build_output(
             recipe,
             build_configuration: BuildConfiguration {
                 target_platform: discovered_output.target_platform,
-                host_platform: args.target_platform,
-                build_platform: args.build_platform,
+                host_platform: PlatformWithVirtualPackages {
+                    platform: host_platform,
+                    virtual_packages: virtual_packages.clone(),
+                },
+                build_platform: PlatformWithVirtualPackages {
+                    platform: args.build_platform,
+                    virtual_packages: virtual_packages.clone(),
+                },
                 hash,
                 variant: discovered_output.used_vars.clone(),
                 directories: Directories::setup(
@@ -351,7 +401,6 @@ pub async fn run_build_from_args(
                 output
             }
             Err(e) => {
-                tracing::error!("Error building package: {}", e);
                 return Err(e);
             }
         };
@@ -378,6 +427,15 @@ pub async fn run_test_from_args(
 ) -> miette::Result<()> {
     let package_file = canonicalize(args.package_file).into_diagnostic()?;
 
+    // Determine virtual packages of the system. These packages define the
+    // capabilities of the system. Some packages depend on these virtual
+    // packages to indicate compatibility with the hardware of the system.
+    let current_platform = fancy_log_handler
+        .wrap_in_progress("determining virtual packages", move || {
+            PlatformWithVirtualPackages::detect(&VirtualPackageOverrides::from_env())
+        })
+        .into_diagnostic()?;
+
     let tool_config = Configuration::builder()
         .with_logging_output_handler(fancy_log_handler)
         .with_keep_build(true)
@@ -403,6 +461,8 @@ pub async fn run_test_from_args(
     let test_options = TestConfiguration {
         test_prefix: tempdir.path().to_path_buf(),
         target_platform: None,
+        host_platform: None,
+        current_platform,
         keep_test_prefix: false,
         channels,
         channel_priority: ChannelPriority::Strict,

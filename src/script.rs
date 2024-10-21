@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 use indexmap::IndexMap;
 use itertools::Itertools;
+use minijinja::Value;
 use rattler_conda_types::Platform;
 use rattler_shell::activation::{prefix_path_entries, PathModificationBehavior};
 use rattler_shell::shell::{NuShell, ShellEnum};
@@ -8,6 +9,7 @@ use rattler_shell::{
     activation::{ActivationError, ActivationVariables, Activator},
     shell::{self, Shell},
 };
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Error;
 use std::{
@@ -20,7 +22,10 @@ use tokio::io::AsyncBufReadExt as _;
 use crate::{
     env_vars::{self},
     metadata::Output,
-    recipe::parser::{Script, ScriptContent},
+    recipe::{
+        parser::{Script, ScriptContent},
+        Jinja,
+    },
 };
 
 const BASH_PREAMBLE: &str = r#"
@@ -57,14 +62,26 @@ impl ExecutionArgs {
         let mut replacements = HashMap::new();
         if let Some(build_prefix) = &self.build_prefix {
             replacements.insert(
-                build_prefix.to_string_lossy().to_string(),
+                build_prefix.display().to_string(),
                 template.replace("((var))", "BUILD_PREFIX"),
             );
         };
         replacements.insert(
-            self.run_prefix.to_string_lossy().to_string(),
+            self.run_prefix.display().to_string(),
             template.replace("((var))", "PREFIX"),
         );
+
+        replacements.insert(
+            self.work_dir.display().to_string(),
+            template.replace("((var))", "SRC_DIR"),
+        );
+
+        // if the paths contain `\` then also replace the forward slash variants
+        for (k, v) in replacements.clone() {
+            if k.contains('\\') {
+                replacements.insert(k.replace('\\', "/"), v.clone());
+            }
+        }
 
         self.secrets.iter().for_each(|(_, v)| {
             replacements.insert(v.to_string(), "********".to_string());
@@ -177,14 +194,13 @@ impl Interpreter for BashInterpreter {
         .await?;
 
         if !output.status.success() {
+            let status_code = output.status.code().unwrap_or(1);
+            tracing::error!("Script failed with status {}", status_code);
+            tracing::error!("Work directory: '{}'", args.work_dir.display());
+            tracing::error!("{}", DEBUG_HELP);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!(
-                    "Script failed with status {:?}.\nWork directory: {:?}\n{}",
-                    output.status.code(),
-                    args.work_dir,
-                    DEBUG_HELP
-                ),
+                "Script failed".to_string(),
             ));
         }
 
@@ -312,14 +328,13 @@ impl Interpreter for NuShellInterpreter {
         .await?;
 
         if !output.status.success() {
+            let status_code = output.status.code().unwrap_or(1);
+            tracing::error!("Script failed with status {}", status_code);
+            tracing::error!("Work directory: '{}'", args.work_dir.display());
+            tracing::error!("{}", DEBUG_HELP);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!(
-                    "Script failed with status {:?}.\nWork directory: {:?}\n{}",
-                    output.status.code(),
-                    args.work_dir,
-                    DEBUG_HELP
-                ),
+                "Script failed".to_string(),
             ));
         }
 
@@ -337,9 +352,13 @@ impl Interpreter for NuShellInterpreter {
 
 const CMDEXE_PREAMBLE: &str = r#"
 @chcp 65001 > nul
+@echo on
 IF "%CONDA_BUILD%" == "" (
+    @rem special behavior from conda-build for Windows
     call ((script_path))
 )
+@rem re-enable echo because the activation scripts might have messed with it
+@echo on
 "#;
 
 struct CmdExeInterpreter;
@@ -355,7 +374,16 @@ impl Interpreter for CmdExeInterpreter {
 
         let build_script = format!(
             "{}\n{}",
-            CMDEXE_PREAMBLE.replace("((script_path))", &build_env_path.to_string_lossy()),
+            CMDEXE_PREAMBLE
+                .replace("((script_path))", &build_env_path.to_string_lossy())
+                .replace(
+                    "((LIBRARY_INC))",
+                    &args.env_vars.get("LIBRARY_INC").unwrap_or(&"".to_string())
+                )
+                .replace(
+                    "((LIBRARY_LIB))",
+                    &args.env_vars.get("LIBRARY_LIB").unwrap_or(&"".to_string())
+                ),
             args.script.script()
         );
         tokio::fs::write(
@@ -375,14 +403,13 @@ impl Interpreter for CmdExeInterpreter {
         .await?;
 
         if !output.status.success() {
+            let status_code = output.status.code().unwrap_or(1);
+            tracing::error!("Script failed with status {}", status_code);
+            tracing::error!("Work directory: '{}'", args.work_dir.display());
+            tracing::error!("{}", DEBUG_HELP);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!(
-                    "Script failed with status {:?}.\nWork directory: {:?}\n{}",
-                    output.status.code(),
-                    args.work_dir,
-                    DEBUG_HELP
-                ),
+                "Script failed".to_string(),
             ));
         }
 
@@ -479,12 +506,13 @@ impl Script {
         }
     }
 
-    fn get_contents(
+    pub(crate) fn resolve_content(
         &self,
         recipe_dir: &Path,
+        jinja_context: Option<Jinja>,
         extensions: &[&str],
     ) -> Result<ResolvedScriptContents, std::io::Error> {
-        match self.contents() {
+        let script_content = match self.contents() {
             // No script was specified, so we try to read the default script. If the file cannot be
             // found we return an empty string.
             ScriptContent::Default => {
@@ -537,16 +565,35 @@ impl Script {
             ScriptContent::Command(command) => {
                 Ok(ResolvedScriptContents::Inline(command.to_owned()))
             }
+        };
+
+        // render jinja if it is an inline script
+        if let Some(jinja_context) = jinja_context {
+            match script_content? {
+                ResolvedScriptContents::Inline(script) => {
+                    let rendered = jinja_context.render_str(&script).map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Failed to render jinja template in build `script`: {}", e),
+                        )
+                    })?;
+                    Ok(ResolvedScriptContents::Inline(rendered))
+                }
+                other => Ok(other),
+            }
+        } else {
+            script_content
         }
     }
 
     pub async fn run_script(
         &self,
-        env_vars: HashMap<String, String>,
+        env_vars: HashMap<String, Option<String>>,
         work_dir: &Path,
         recipe_dir: &Path,
         run_prefix: &Path,
         build_prefix: Option<&PathBuf>,
+        mut jinja_config: Option<Jinja<'_>>,
     ) -> Result<(), std::io::Error> {
         // TODO: This is a bit of an out and about way to determine whether or
         //  not nushell is available. It would be best to run the activation
@@ -579,8 +626,22 @@ impl Script {
             valid_script_extensions.push("nu");
         }
 
+        let env_vars = env_vars
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .chain(self.env().clone().into_iter())
+            .collect::<IndexMap<String, String>>();
+
         // Get the contents of the script.
-        let contents = self.get_contents(recipe_dir, &valid_script_extensions)?;
+        for (k, v) in &env_vars {
+            jinja_config.as_mut().map(|jinja| {
+                jinja
+                    .context_mut()
+                    .insert(k.clone(), Value::from_safe_string(v.clone()))
+            });
+        }
+
+        let contents = self.resolve_content(recipe_dir, jinja_config, &valid_script_extensions)?;
 
         // Select a different interpreter if the script is a nushell script.
         if contents
@@ -607,11 +668,6 @@ impl Script {
                     None
                 }
             })
-            .collect::<IndexMap<String, String>>();
-
-        let env_vars = env_vars
-            .into_iter()
-            .chain(self.env().clone().into_iter())
             .collect::<IndexMap<String, String>>();
 
         let work_dir = if let Some(cwd) = self.cwd.as_ref() {
@@ -658,6 +714,22 @@ impl Script {
 }
 
 impl Output {
+    /// Add environment variables from the variant to the environment variables.
+    fn env_vars_from_variant(&self) -> HashMap<String, Option<String>> {
+        let languages: HashSet<&str> = HashSet::from(["PERL", "LUA", "R", "NUMPY", "PYTHON"]);
+        self.variant()
+            .iter()
+            .filter_map(|(k, v)| {
+                let key_upper = k.to_uppercase();
+                if !languages.contains(key_upper.as_str()) {
+                    Some((k.replace('-', "_"), Some(v.to_string())))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     pub async fn run_build_script(&self) -> Result<(), std::io::Error> {
         let span = tracing::info_span!("Running build script");
         let _enter = span.enter();
@@ -666,6 +738,15 @@ impl Output {
         let target_platform = self.build_configuration.target_platform;
         let mut env_vars = env_vars::vars(self, "BUILD");
         env_vars.extend(env_vars::os_vars(&host_prefix, &target_platform));
+        env_vars.extend(self.env_vars_from_variant());
+
+        let selector_config = self.build_configuration.selector_config();
+        let mut jinja = Jinja::new(selector_config.clone());
+        for (k, v) in self.recipe.context.iter() {
+            jinja
+                .context_mut()
+                .insert(k.clone(), Value::from_safe_string(v.clone()));
+        }
 
         self.recipe
             .build()
@@ -676,6 +757,7 @@ impl Output {
                 &self.build_configuration.directories.recipe_dir,
                 &self.build_configuration.directories.host_prefix,
                 Some(&self.build_configuration.directories.build_prefix),
+                Some(jinja),
             )
             .await?;
 
@@ -709,6 +791,7 @@ async fn run_process_with_replacements(
     let mut stdout_log = String::new();
     let mut stderr_log = String::new();
     let mut closed = (false, false);
+
     loop {
         let (line, is_stderr) = tokio::select! {
             line = stdout_lines.next_line() => (line, false),

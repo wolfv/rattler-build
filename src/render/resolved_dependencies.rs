@@ -8,12 +8,10 @@ use std::{
 
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
 use rattler::install::Placement;
-use rattler_cache::package_cache::{CacheKey, PackageCache, PackageCacheError};
+use rattler_cache::package_cache::PackageCache;
 use rattler_conda_types::{
-    package::{PackageFile, RunExportsJson},
-    version_spec::ParseVersionSpecError,
-    MatchSpec, PackageName, PackageRecord, ParseStrictness, Platform, RepoDataRecord,
-    StringMatcher, VersionSpec,
+    package::RunExportsJson, version_spec::ParseVersionSpecError, MatchSpec, PackageName,
+    PackageRecord, ParseStrictness, Platform, RepoDataRecord, StringMatcher, VersionSpec,
 };
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize};
@@ -25,12 +23,13 @@ use url::Url;
 use super::pin::PinError;
 use crate::{
     metadata::{build_reindexed_channels, BuildConfiguration, Output},
+    package_cache_reporter::PackageCacheReporter,
     recipe::parser::{Dependency, Requirements},
     render::{
-        package_cache_reporter::PackageCacheReporter,
         pin::PinArgs,
         solver::{install_packages, solve_environment},
     },
+    run_exports::{RunExportExtractor, RunExportExtractorError},
     tool_configuration,
     tool_configuration::Configuration,
 };
@@ -421,7 +420,7 @@ pub enum ResolveError {
     DependencyResolutionError(#[from] anyhow::Error),
 
     #[error("Could not collect run exports")]
-    CouldNotCollectRunExports(#[from] PackageCacheError),
+    CouldNotCollectRunExports(#[from] RunExportExtractorError),
 
     #[error("Could not parse version spec: {0}")]
     VersionSpecParseError(#[from] ParseVersionSpecError),
@@ -466,7 +465,9 @@ pub fn apply_variant(
                     let m = m.clone();
                     if m.version.is_none() && m.build.is_none() {
                         if let Some(name) = &m.name {
-                            if let Some(version) = variant.get(name.as_normalized()) {
+                            if let Some(version) =
+                                variant.get(&name.as_normalized().replace('-', "_"))
+                            {
                                 // if the variant starts with an alphanumeric character,
                                 // we have to add a '=' to the version spec
                                 let mut spec = version.clone();
@@ -552,11 +553,11 @@ async fn amend_run_exports(
     multi_progress: MultiProgress,
     progress_prefix: impl Into<Cow<'static, str>>,
     top_level_pb: Option<ProgressBar>,
-) -> Result<(), PackageCacheError> {
+) -> Result<(), RunExportExtractorError> {
     let max_concurrent_requests = Arc::new(Semaphore::new(50));
     let (tx, mut rx) = mpsc::channel(50);
 
-    let mut progress = PackageCacheReporter::new(
+    let progress = PackageCacheReporter::new(
         multi_progress,
         top_level_pb.map_or(Placement::End, Placement::After),
     )
@@ -568,39 +569,23 @@ async fn amend_run_exports(
             continue;
         }
 
-        let progress_reporter = Arc::new(progress.add(pkg));
+        let extractor = RunExportExtractor::default()
+            .with_max_concurrent_requests(max_concurrent_requests.clone())
+            .with_client(client.clone())
+            .with_package_cache(package_cache.clone(), progress.clone());
 
-        let cache_key = CacheKey::from(&pkg.package_record);
-        let client = client.clone();
-        let url = pkg.url.clone();
-        let max_concurrent_requests = max_concurrent_requests.clone();
         let tx = tx.clone();
-        let package_cache = package_cache.clone();
+        let record = pkg.clone();
         tokio::spawn(async move {
-            let _permit = max_concurrent_requests
-                .acquire_owned()
-                .await
-                .expect("semaphore error");
-            let result = match package_cache
-                .get_or_fetch_from_url(cache_key, url, client, Some(progress_reporter))
-                .await
-            {
-                Ok(package_dir) => {
-                    let run_exports =
-                        RunExportsJson::from_package_directory(package_dir.path()).ok();
-                    Ok((pkg_idx, run_exports))
-                }
-                Err(e) => Err(e),
-            };
-            let _ = tx.send(result).await;
+            let result = extractor.extract(&record).await;
+            let _ = tx.send((pkg_idx, result)).await;
         });
     }
 
     drop(tx);
 
-    while let Some(result) = rx.recv().await {
-        let (pkg_idx, run_exports) = result?;
-        records[pkg_idx].package_record.run_exports = run_exports;
+    while let Some((pkg_idx, run_exports)) = rx.recv().await {
+        records[pkg_idx].package_record.run_exports = run_exports?;
     }
 
     Ok(())
@@ -608,13 +593,9 @@ async fn amend_run_exports(
 
 pub async fn install_environments(
     output: &Output,
+    dependencies: &FinalizedDependencies,
     tool_configuration: &tool_configuration::Configuration,
 ) -> Result<(), ResolveError> {
-    let dependencies = output
-        .finalized_dependencies
-        .as_ref()
-        .ok_or(ResolveError::FinalizedDependencyNotFound)?;
-
     const EMPTY_RECORDS: Vec<RepoDataRecord> = Vec::new();
     install_packages(
         "build",
@@ -623,7 +604,7 @@ pub async fn install_environments(
             .as_ref()
             .map(|deps| &deps.resolved)
             .unwrap_or(&EMPTY_RECORDS),
-        &output.build_configuration.build_platform,
+        output.build_configuration.build_platform.platform,
         &output.build_configuration.directories.build_prefix,
         tool_configuration,
     )
@@ -636,7 +617,7 @@ pub async fn install_environments(
             .as_ref()
             .map(|deps| &deps.resolved)
             .unwrap_or(&EMPTY_RECORDS),
-        &output.build_configuration.host_platform,
+        output.build_configuration.host_platform.platform,
         &output.build_configuration.directories.host_prefix,
         tool_configuration,
     )
@@ -1007,7 +988,12 @@ impl Output {
         &self,
         tool_configuration: &Configuration,
     ) -> Result<(), ResolveError> {
-        install_environments(self, tool_configuration).await
+        let dependencies = self
+            .finalized_dependencies
+            .as_ref()
+            .ok_or(ResolveError::FinalizedDependencyNotFound)?;
+
+        install_environments(self, dependencies, tool_configuration).await
     }
 }
 
@@ -1035,6 +1021,7 @@ mod tests {
                     upper_bound: Some("x.x".parse().unwrap()),
                     lower_bound: Some("x.x.x".parse().unwrap()),
                     exact: true,
+                    ..Default::default()
                 },
             }
             .into(),
@@ -1045,6 +1032,7 @@ mod tests {
                     upper_bound: Some("x.x".parse().unwrap()),
                     lower_bound: Some("x.x.x".parse().unwrap()),
                     exact: true,
+                    ..Default::default()
                 },
             }
             .into(),

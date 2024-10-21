@@ -556,7 +556,7 @@ mod test {
                 args: PinArgs {
                     lower_bound: Some("x.x.x.x".parse().unwrap()),
                     upper_bound: Some("x.x".parse().unwrap()),
-                    exact: false,
+                    ..Default::default()
                 },
             },
         };
@@ -567,7 +567,7 @@ mod test {
                 args: PinArgs {
                     lower_bound: Some("x.x".parse().unwrap()),
                     upper_bound: Some("x.x.x".parse().unwrap()),
-                    exact: false,
+                    ..Default::default()
                 },
             },
         };
@@ -579,6 +579,7 @@ mod test {
                     lower_bound: Some("x.x".parse().unwrap()),
                     upper_bound: None,
                     exact: true,
+                    ..Default::default()
                 },
             },
         };
