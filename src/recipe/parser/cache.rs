@@ -7,6 +7,7 @@ use crate::{
     },
     validate_keys,
 };
+use rattler_conda_types::PackageName;
 use serde::{Deserialize, Serialize};
 
 use super::{Build, Requirements, Source};
@@ -21,6 +22,8 @@ pub struct Cache {
     pub build: Build,
     /// The requirements for building the cache
     pub requirements: Requirements,
+    /// The outputs that should get run-exports attached from the cache build
+    pub attach_run_exports_to: Vec<PackageName>,
 }
 
 impl TryConvertNode<Cache> for RenderedNode {
@@ -40,7 +43,8 @@ impl TryConvertNode<Cache> for RenderedMappingNode {
             self.iter(),
             source,
             build,
-            requirements
+            requirements,
+            attach_run_exports_to
         };
 
         Ok(cache)

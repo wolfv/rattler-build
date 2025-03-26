@@ -272,7 +272,7 @@ impl Recipe {
                             "The recipe field is only allowed in conjunction with multiple outputs"
                     )])
                     }
-                    "cache" => {
+                    "staging_area" => {
                         if experimental {
                             cache = Some(value.try_convert(key_str)?)
                         } else {

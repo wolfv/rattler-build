@@ -689,6 +689,13 @@ pub(crate) async fn resolve_dependencies(
 
     let mut compatibility_specs = HashMap::new();
 
+    let attach_cache_run_exports = output
+        .recipe
+        .cache
+        .as_ref()
+        .map(|c| c.attach_run_exports_to.contains(&output.name()))
+        .unwrap_or(false);
+
     let build_env = if !requirements.build.is_empty() && !merge_build_host {
         let build_env_specs = apply_variant(
             requirements.build(),
@@ -765,18 +772,20 @@ pub(crate) async fn resolve_dependencies(
     let output_ignore_run_exports = requirements.ignore_run_exports(None);
     let mut build_run_exports = output_ignore_run_exports.filter(&build_run_exports, "build")?;
 
-    if let Some(cache) = &output.finalized_cache_dependencies {
-        if let Some(cache_build_env) = &cache.build {
-            let cache_build_run_exports = cache_build_env.run_exports(true);
-            let filtered = output
-                .recipe
-                .cache
-                .as_ref()
-                .expect("recipe should have cache section")
-                .requirements
-                .ignore_run_exports(Some(&output_ignore_run_exports))
-                .filter(&cache_build_run_exports, "cache-build")?;
-            build_run_exports.extend(&filtered);
+    if attach_cache_run_exports {
+        if let Some(cache) = &output.finalized_cache_dependencies {
+            if let Some(cache_build_env) = &cache.build {
+                let cache_build_run_exports = cache_build_env.run_exports(true);
+                let filtered = output
+                    .recipe
+                    .cache
+                    .as_ref()
+                    .expect("recipe should have cache section")
+                    .requirements
+                    .ignore_run_exports(Some(&output_ignore_run_exports))
+                    .filter(&cache_build_run_exports, "cache-build")?;
+                build_run_exports.extend(&filtered);
+            }
         }
     }
 
@@ -858,29 +867,31 @@ pub(crate) async fn resolve_dependencies(
     )?;
 
     // add in dependencies from the finalized cache
-    if let Some(finalized_cache) = &output.finalized_cache_dependencies {
-        tracing::info!(
-            "Adding dependencies from finalized cache: {:?}",
-            finalized_cache.run.depends
-        );
+    if attach_cache_run_exports {
+        if let Some(finalized_cache) = &output.finalized_cache_dependencies {
+            tracing::info!(
+                "Adding dependencies from finalized cache: {:?}",
+                finalized_cache.run.depends
+            );
 
-        depends = depends
-            .iter()
-            .chain(finalized_cache.run.depends.iter())
-            .filter(|c| !matches!(c, DependencyInfo::RunExport(_)))
-            .cloned()
-            .collect();
+            depends = depends
+                .iter()
+                .chain(finalized_cache.run.depends.iter())
+                .filter(|c| !matches!(c, DependencyInfo::RunExport(_)))
+                .cloned()
+                .collect();
 
-        tracing::info!(
-            "Adding constraints from finalized cache: {:?}",
-            finalized_cache.run.constraints
-        );
-        constraints = constraints
-            .iter()
-            .chain(finalized_cache.run.constraints.iter())
-            .filter(|c| !matches!(c, DependencyInfo::RunExport(_)))
-            .cloned()
-            .collect();
+            tracing::info!(
+                "Adding constraints from finalized cache: {:?}",
+                finalized_cache.run.constraints
+            );
+            constraints = constraints
+                .iter()
+                .chain(finalized_cache.run.constraints.iter())
+                .filter(|c| !matches!(c, DependencyInfo::RunExport(_)))
+                .cloned()
+                .collect();
+        }
     }
 
     let rendered_run_exports = render_run_exports(output, &compatibility_specs)?;
