@@ -243,7 +243,7 @@ impl Recipe {
         }
 
         let rendered_node: RenderedMappingNode = root_node.render(&jinja, "ROOT")?;
-
+        println!("Rendering from node: {rendered_node:?}");
         let mut schema_version = 1;
         let mut package = None;
         let mut build = Build::default();

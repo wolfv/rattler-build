@@ -11,7 +11,6 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use dunce::canonicalize;
 use fs_err as fs;
 use indicatif::HumanBytes;
 use rattler_conda_types::{
@@ -96,39 +95,62 @@ pub struct Directories {
     pub output_dir: PathBuf,
 }
 
-fn get_build_dir(
-    output_dir: &Path,
-    name: &str,
-    no_build_id: bool,
-    timestamp: &DateTime<Utc>,
-) -> Result<PathBuf, std::io::Error> {
-    let since_the_epoch = timestamp.timestamp();
-
-    let dirname = if no_build_id {
-        format!("rattler-build_{}", name)
-    } else {
-        format!("rattler-build_{}_{:?}", name, since_the_epoch)
+fn get_build_dir(output_dir: &Path, name: &str, build_id: &BuildId) -> PathBuf {
+    let dirname = match build_id {
+        BuildId::NoBuildId => format!("rattler-build_{}", name),
+        BuildId::Timestamp(timestamp) => format!(
+            "rattler-build_{}_{:?}",
+            name,
+            timestamp.unwrap_or_else(Utc::now).timestamp()
+        ),
+        BuildId::NanoId => format!("rattler-build_{}_{}", name, nanoid::nanoid!(6)),
     };
-    Ok(output_dir.join("bld").join(dirname))
+
+    output_dir.join("bld").join(dirname)
+}
+
+/// Build id to use for the unique identification of a build directory.
+pub enum BuildId {
+    /// No build ID, just the name of the package
+    NoBuildId,
+
+    /// Use the timestamp as build ID
+    Timestamp(Option<DateTime<Utc>>),
+
+    /// Use a NanoId as build ID
+    NanoId,
+}
+
+/// Configuration options for the directories used during the build process.
+pub struct DirectoryConfig {
+    /// The root directory of the recipe.
+    pub output_dir: PathBuf,
+
+    /// The path to the recipe file.
+    pub recipe_path: PathBuf,
+
+    /// Whether to use a build id or not.
+    pub build_id_config: BuildId,
 }
 
 impl Directories {
-    /// Create all directories needed for the building of a package
-    pub fn setup(
+    /// Create a new `Directories` instance, without actually creating any directories on disk.
+    pub fn new(
         name: &str,
-        recipe_path: &Path,
-        output_dir: &Path,
-        no_build_id: bool,
-        timestamp: &DateTime<Utc>,
+        directory_config: &DirectoryConfig,
         merge_build_and_host: bool,
-    ) -> Result<Directories, std::io::Error> {
-        if !output_dir.exists() {
-            fs::create_dir_all(output_dir)?;
+    ) -> Result<Self, std::io::Error> {
+        let output_dir = &directory_config.output_dir;
+        if !output_dir.is_absolute() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Output directory must be an absolute path",
+            ));
         }
-        let output_dir = canonicalize(output_dir)?;
 
-        let build_dir = get_build_dir(&output_dir, name, no_build_id, timestamp)
-            .expect("Could not create build directory");
+        let build_dir = get_build_dir(output_dir, name, &directory_config.build_id_config);
+
+        let recipe_path = &directory_config.recipe_path;
         // TODO move this into build_dir, and keep build_dir consistent.
         let cache_dir = output_dir.join("build_cache");
         let recipe_dir = recipe_path
@@ -168,10 +190,20 @@ impl Directories {
             work_dir: build_dir.join("work"),
             recipe_dir,
             recipe_path: recipe_path.to_path_buf(),
-            output_dir,
+            output_dir: output_dir.to_path_buf(),
         };
 
         Ok(directories)
+    }
+
+    /// Create all directories needed for the building of a package
+    pub fn setup(&self) -> Result<(), std::io::Error> {
+        fs::create_dir_all(&self.output_dir)?;
+        if !self.output_dir.join(".condapackageignore").exists() {
+            fs::write(self.output_dir.join(".condapackageignore"), "*")?;
+        }
+
+        Ok(())
     }
 
     /// Remove all directories except for the cache directory

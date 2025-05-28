@@ -21,6 +21,8 @@ pub struct GlobWithSource {
     glob: Glob,
     /// The source string
     source: String,
+    /// The source string for Jinja2 templates
+    pub jinja_source: String,
 }
 
 impl GlobWithSource {
@@ -61,7 +63,7 @@ impl From<Vec<String>> for InnerGlobVec {
     fn from(vec: Vec<String>) -> Self {
         let vec = vec
             .into_iter()
-            .map(|glob| to_glob(&glob).expect("glob parsing failed"))
+            .map(|glob| to_glob(&glob, &glob).expect("glob parsing failed"))
             .collect();
         Self(vec)
     }
@@ -73,7 +75,7 @@ impl From<Vec<GlobWithSource>> for InnerGlobVec {
     }
 }
 
-fn to_glob(glob: &str) -> Result<GlobWithSource, globset::Error> {
+fn to_glob(glob: &str, jinja_source: &str) -> Result<GlobWithSource, globset::Error> {
     // first, try to parse as a normal glob so that we get a descriptive error
     let _ = Glob::new(glob)?;
     if glob.ends_with('/') {
@@ -81,6 +83,7 @@ fn to_glob(glob: &str) -> Result<GlobWithSource, globset::Error> {
         Ok(GlobWithSource {
             glob: Glob::new(&format!("{glob}**"))?,
             source: glob.to_string(),
+            jinja_source: jinja_source.to_string(),
         })
     } else {
         // Match either file, or folder
@@ -89,6 +92,7 @@ fn to_glob(glob: &str) -> Result<GlobWithSource, globset::Error> {
                 .empty_alternates(true)
                 .build()?,
             source: glob.to_string(),
+            jinja_source: jinja_source.to_string(),
         })
     }
 }
@@ -181,6 +185,14 @@ impl GlobVec {
         })
     }
 
+    /// asdasdas
+    pub fn render(&self) {
+        println!("{:?}", self.include_globs());
+        for glob in self.include_globs() {
+            println!("Include: {} ({})", glob.glob.glob(), glob.source());
+        }
+    }
+
     /// Returns true if the globvec is empty
     pub fn is_empty(&self) -> bool {
         self.include.is_empty() && self.exclude.is_empty()
@@ -214,13 +226,13 @@ impl GlobVec {
     pub fn from_vec(include: Vec<&str>, exclude: Option<Vec<&str>>) -> Self {
         let include_vec: Vec<GlobWithSource> = include
             .into_iter()
-            .map(|glob| to_glob(glob).unwrap())
+            .map(|glob| to_glob(glob, glob).unwrap())
             .collect();
 
         let exclude_vec: Vec<GlobWithSource> = exclude
             .unwrap_or_default()
             .into_iter()
-            .map(|glob| to_glob(glob).unwrap())
+            .map(|glob| to_glob(glob, glob).unwrap())
             .collect();
 
         let include = InnerGlobVec(include_vec);
@@ -257,11 +269,22 @@ fn to_vector_of_globs(
 ) -> Result<Vec<GlobWithSource>, Vec<PartialParsingError>> {
     let mut vec = Vec::with_capacity(sequence.len());
     for item in sequence.iter() {
-        let str: String = item.try_convert("globs")?;
-        vec.push(
-            to_glob(&str)
-                .map_err(|err| vec![_partialerror!(*item.span(), ErrorKind::GlobParsing(err),)])?,
-        );
+        match item {
+            RenderedNode::Scalar(scalar) => {
+                let str = scalar.as_str();
+                vec.push(
+                    to_glob(str, scalar.source())
+                        .map_err(|err| vec![_partialerror!(*item.span(), ErrorKind::GlobParsing(err),)])?,
+                );
+            }
+            _ => {
+                return Err(vec![_partialerror!(
+                    *item.span(),
+                    ErrorKind::ExpectedScalar,
+                    label = "expected a string glob"
+                )]);
+            }
+        }
     }
     Ok(vec)
 }
@@ -269,7 +292,7 @@ fn to_vector_of_globs(
 impl TryConvertNode<GlobVec> for RenderedScalarNode {
     fn try_convert(&self, _name: &str) -> Result<GlobVec, Vec<PartialParsingError>> {
         let vec = vec![
-            to_glob(self.as_str())
+            to_glob(self.as_str(), self.source())
                 .map_err(|err| vec![_partialerror!(*self.span(), ErrorKind::GlobParsing(err),)])?,
         ];
         GlobVec::new(vec.into(), InnerGlobVec::default())

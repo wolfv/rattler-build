@@ -116,6 +116,8 @@ fn copy_license_files(
         let copied_files_work_dir = copy_dir.copied_paths();
         let any_include_matched_recipe_dir = copy_dir.any_include_glob_matched();
 
+        output.recipe.about().license_file.render();
+
         let copy_dir = copy_dir::CopyDir::new(
             &output.build_configuration.directories.recipe_dir,
             &licenses_folder,

@@ -18,6 +18,7 @@ use crate::{
     conda_build_config::{ParseConfigBuildConfigError, load_conda_build_config},
     consts::CONDA_BUILD_CONFIG_FILE,
     hash::HashInfo,
+    metadata::{Directories, DirectoryConfig},
     normalized_key::NormalizedKey,
     recipe::{
         Jinja, Recipe, Render,
@@ -42,6 +43,7 @@ pub struct DiscoveredOutput {
     pub used_vars: BTreeMap<NormalizedKey, Variable>,
     pub recipe: Recipe,
     pub hash: HashInfo,
+    pub directories: Directories,
 }
 
 impl Eq for DiscoveredOutput {}
@@ -507,11 +509,16 @@ impl VariantConfig {
         &self,
         outputs: &[Node],
         recipe: S,
+        directory_config: &DirectoryConfig,
         selector_config: &SelectorConfig,
     ) -> Result<IndexSet<DiscoveredOutput>, VariantError<S>> {
         // find all jinja variables
+        println!("selector_config: {selector_config:?}");
+
         let stage_0 = stage_0_render(outputs, recipe, selector_config, self)?;
         let stage_1 = stage_1_render(stage_0, selector_config, self)?;
+
+        let mut first_name = None;
 
         // Now we need to convert the stage 1 renders to DiscoveredOutputs
         let mut recipes = IndexSet::new();
@@ -522,6 +529,10 @@ impl VariantConfig {
                 } else {
                     Platform::NoArch
                 };
+
+                if first_name.is_none() {
+                    first_name = Some(recipe.package().name.as_normalized().to_string());
+                }
 
                 let build_string = recipe
                     .build()
@@ -543,6 +554,19 @@ impl VariantConfig {
                         .insert("python".parse().unwrap());
                 }
 
+                let build_name = if recipe.cache.is_some() {
+                    first_name.as_ref().expect("First name was set earlier")
+                } else {
+                    recipe.package().name().as_normalized()
+                };
+
+                let directories = Directories::new(
+                    build_name,
+                    directory_config,
+                    recipe.build().merge_build_and_host_envs(),
+                )
+                .unwrap();
+
                 recipes.insert(DiscoveredOutput {
                     name: recipe.package().name.as_normalized().to_string(),
                     version: recipe.package().version.to_string(),
@@ -553,6 +577,7 @@ impl VariantConfig {
                     used_vars: variant.clone(),
                     recipe: recipe.clone(),
                     hash: HashInfo::from_variant(&variant, recipe.build().noarch()),
+                    directories,
                 });
             }
         }

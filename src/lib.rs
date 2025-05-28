@@ -56,8 +56,8 @@ use dunce::canonicalize;
 use fs_err as fs;
 use futures::FutureExt;
 use metadata::{
-    BuildConfiguration, BuildSummary, Directories, Output, PackageIdentifier, PackagingSettings,
-    build_reindexed_channels,
+    BuildConfiguration, BuildId, BuildSummary, DirectoryConfig, Output, PackageIdentifier,
+    PackagingSettings, build_reindexed_channels,
 };
 use miette::{Context, IntoDiagnostic};
 pub use normalized_key::NormalizedKey;
@@ -253,8 +253,18 @@ pub async fn get_build_output(
 
     let variant_config = VariantConfig::from_files(&variant_configs, &selector_config)?;
 
-    let outputs_and_variants =
-        variant_config.find_variants(&outputs, named_source, &selector_config)?;
+    let directory_config = DirectoryConfig {
+        recipe_path: dunce::canonicalize(recipe_path).into_diagnostic()?,
+        output_dir: dunce::canonicalize(output_dir).into_diagnostic()?,
+        build_id_config: BuildId::NanoId,
+    };
+
+    let outputs_and_variants = variant_config.find_variants(
+        &outputs,
+        named_source,
+        &directory_config,
+        &selector_config,
+    )?;
 
     tracing::info!("Found {} variants\n", outputs_and_variants.len());
     for discovered_output in &outputs_and_variants {
@@ -287,11 +297,6 @@ pub async fn get_build_output(
     let mut subpackages = BTreeMap::new();
     let mut outputs = Vec::new();
 
-    let global_build_name = outputs_and_variants
-        .first()
-        .map(|o| o.name.clone())
-        .unwrap_or_default();
-
     for discovered_output in outputs_and_variants {
         let recipe = &discovered_output.recipe;
 
@@ -307,12 +312,6 @@ pub async fn get_build_output(
                 build_string: discovered_output.build_string.clone(),
             },
         );
-
-        let build_name = if recipe.cache.is_some() {
-            global_build_name.clone()
-        } else {
-            recipe.package().name().as_normalized().to_string()
-        };
 
         let variant_channels = if let Some(channel_sources) = discovered_output
             .used_vars
@@ -353,8 +352,9 @@ pub async fn get_build_output(
             .collect::<Result<Vec<_>, _>>()
             .into_diagnostic()?;
 
-        let timestamp = chrono::Utc::now();
+        discovered_output.directories.setup().into_diagnostic()?;
 
+        let timestamp = chrono::Utc::now();
         let output = metadata::Output {
             recipe: recipe.clone(),
             build_configuration: BuildConfiguration {
@@ -369,15 +369,7 @@ pub async fn get_build_output(
                 },
                 hash: discovered_output.hash.clone(),
                 variant: discovered_output.used_vars.clone(),
-                directories: Directories::setup(
-                    &build_name,
-                    recipe_path,
-                    &output_dir,
-                    build_data.no_build_id,
-                    &timestamp,
-                    recipe.build().merge_build_and_host_envs(),
-                )
-                .into_diagnostic()?,
+                directories: discovered_output.directories.clone(),
                 channels,
                 channel_priority: tool_config.channel_priority,
                 solve_strategy: SolveStrategy::Highest,
