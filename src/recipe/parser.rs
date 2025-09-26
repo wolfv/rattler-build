@@ -192,9 +192,9 @@ impl Recipe {
 
                         for (index, item) in sequence.iter().enumerate() {
                             let rendered_item: Node =
-                                item.render(&jinja, &format!("context.{}[{}]", k.as_str(), index))?;
+                                item.render(jinja, &format!("context.{}[{}]", k.as_str(), index))?;
                             if let Some(variable) =
-                                Self::context_scalar_to_var(k, &rendered_item, &jinja)?
+                                Self::context_scalar_to_var(k, &rendered_item, jinja)?
                             {
                                 if index != 0
                                     && variable.as_ref().kind()
@@ -220,7 +220,7 @@ impl Recipe {
                             help = "Sequence values in `context` are only allowed in experimental mode (`--experimental`)"
                         )]);
                     }
-                } else if let Some(variable) = Self::context_scalar_to_var(k, v, &jinja)? {
+                } else if let Some(variable) = Self::context_scalar_to_var(k, v, jinja)? {
                     variable
                 } else {
                     continue;
