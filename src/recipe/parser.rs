@@ -166,10 +166,8 @@ impl Recipe {
 
     /// Parse the `context` mapping from the YAML file. This is a special parsing that takes into
     /// account the ordering of the context variables and allows for jinja rendering.
-    /// The `experimental` flag indicates whether experimental features are enabled.
     pub fn parse_context(
         root_node: &MappingNode,
-        experimental: bool,
         jinja: &mut Jinja,
     ) -> Result<IndexMap<String, Variable>, Vec<PartialParsingError>> {
         // add context values
@@ -243,7 +241,7 @@ impl Recipe {
         })?;
 
         // Parse the context (note: this populates the jinja context as well)
-        let context = Self::parse_context(root_node, experimental, &mut jinja)?;
+        let context = Self::parse_context(root_node, &mut jinja)?;
 
         let rendered_node: RenderedMappingNode = root_node.render(&jinja, "ROOT")?;
 
