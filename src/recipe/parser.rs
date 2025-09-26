@@ -11,7 +11,7 @@ use crate::{
     _partialerror,
     recipe::{
         Render,
-        custom_yaml::{HasSpan, RenderedMappingNode, ScalarNode, TryConvertNode},
+        custom_yaml::{HasSpan, MappingNode, RenderedMappingNode, ScalarNode, TryConvertNode},
         error::{ErrorKind, ParsingError, PartialParsingError},
         jinja::Jinja,
     },
@@ -164,22 +164,14 @@ impl Recipe {
         }
     }
 
-    /// Create recipes from a YAML [`Node`] structure.
-    pub fn from_node(
-        root_node: &Node,
-        jinja_opt: SelectorConfig,
-    ) -> Result<Self, Vec<PartialParsingError>> {
-        let experimental = jinja_opt.experimental;
-        let mut jinja = Jinja::new(jinja_opt);
-
-        let root_node = root_node.as_mapping().ok_or_else(|| {
-            vec![_partialerror!(
-                *root_node.span(),
-                ErrorKind::ExpectedMapping,
-                help = "root node must always be a map with keys like `package`, `source`, `build`, `requirements`, `tests`, `about`, `context` and `extra`"
-            )]
-        })?;
-
+    /// Parse the `context` mapping from the YAML file. This is a special parsing that takes into
+    /// account the ordering of the context variables and allows for jinja rendering.
+    /// The `experimental` flag indicates whether experimental features are enabled.
+    pub fn parse_context(
+        root_node: &MappingNode,
+        experimental: bool,
+        jinja: &mut Jinja,
+    ) -> Result<IndexMap<String, Variable>, Vec<PartialParsingError>> {
         // add context values
         let mut context: IndexMap<String, Variable> = IndexMap::new();
 
@@ -241,6 +233,27 @@ impl Recipe {
                     .insert(k.as_str().to_string(), variable.into());
             }
         }
+        Ok(context)
+    }
+
+    /// Create recipes from a YAML [`Node`] structure.
+    pub fn from_node(
+        root_node: &Node,
+        jinja_opt: SelectorConfig,
+    ) -> Result<Self, Vec<PartialParsingError>> {
+        let experimental = jinja_opt.experimental;
+        let mut jinja = Jinja::new(jinja_opt);
+
+        let root_node = root_node.as_mapping().ok_or_else(|| {
+            vec![_partialerror!(
+                *root_node.span(),
+                ErrorKind::ExpectedMapping,
+                help = "root node must always be a map with keys like `package`, `source`, `build`, `requirements`, `tests`, `about`, `context` and `extra`"
+            )]
+        })?;
+
+        // Parse the context (note: this populates the jinja context as well)
+        let context = Self::parse_context(root_node, experimental, &mut jinja)?;
 
         let rendered_node: RenderedMappingNode = root_node.render(&jinja, "ROOT")?;
 
