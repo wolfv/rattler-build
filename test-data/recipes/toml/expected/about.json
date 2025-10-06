@@ -1,0 +1,8 @@
+{
+  "channels": [
+    "https://conda.anaconda.org/conda-forge/"
+  ],
+  "home": "https://github.com/uiri/toml",
+  "license": "MIT",
+  "summary": "Python lib for TOML."
+}

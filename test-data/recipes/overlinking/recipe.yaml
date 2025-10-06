@@ -1,0 +1,31 @@
+context:
+  version: "0.1.0"
+
+package:
+  name: zlink
+  version: ${{ version }}
+
+source:
+  path: ../../../examples/linking/zlink/
+
+build:
+  script:
+    - mkdir -p build
+    - cd build
+    - cmake .. -GNinja -DCMAKE_INSTALL_PREFIX=$PREFIX -DZLIB_ROOT=$BUILD_PREFIX
+    - ninja install
+  dynamic_linking:
+    overdepending_behavior: ignore
+    overlinking_behavior: error
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ninja
+    - cmake
+    - zlib
+
+tests:
+  - script:
+      - zlink
+      - ldd $PREFIX/bin/zlink

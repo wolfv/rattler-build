@@ -1,0 +1,51 @@
+context:
+  name: some-pkg.foo
+  name_a: ${{ name }}-a
+  version: 1.0.0
+  build_number: 0
+
+recipe:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  path: ../
+
+# expected order of outputs:
+# 1. some-pkg.foo-a
+# 2. some-pkg.foo
+# 3. some_pkg.foo
+outputs:
+  - package:
+      name: ${{ name }}
+      version: ${{ version }}
+    build:
+      noarch: python
+      number: ${{ build_number }}
+    requirements:
+      host:
+        - python >=3.10
+        - pip
+        - ${{ pin_subpackage(name_a, lower_bound="x.x.x") }}
+      run:
+        - python >=3.10
+  - package:
+      name: ${{ name_a }}
+      version: ${{ version }}
+    build:
+      noarch: python
+      number: ${{ build_number }}
+    requirements:
+      host:
+        - python >=3.10
+        - pip
+      run:
+        - python >=3.10
+  - package:
+      name: ${{ name | replace('-', '_') }}
+      version: ${{ version }}
+    build:
+      noarch: generic
+    requirements:
+      host:
+        - ${{ pin_subpackage(name, exact=true) }}

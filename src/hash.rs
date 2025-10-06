@@ -1,10 +1,12 @@
-//! Compute the build string for a given variant
+//! Compute the build string / hash info for a given variant
 use std::collections::{BTreeMap, HashMap};
 
 use rattler_conda_types::NoArchType;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::ser::Formatter;
 use sha1::{Digest, Sha1};
+
+use crate::{normalized_key::NormalizedKey, recipe::variable::Variable};
 
 /// A hash will be added if all of these are true for any dependency:
 ///
@@ -26,7 +28,7 @@ use sha1::{Digest, Sha1};
 ///
 /// used variables - anything with a value in conda_build_config.yaml that applies to this
 ///    recipe.  Includes compiler if compiler jinja2 function is used.
-
+///
 /// This implements a formatter that uses the same formatting as
 /// as the standard lib python `json.dumps()`
 #[derive(Clone, Debug)]
@@ -66,6 +68,7 @@ impl Formatter for PythonFormatter {
     }
 }
 
+// TODO merge with the jinja function that we have for this
 fn short_version_from_spec(input: &str, length: u32) -> String {
     let mut parts = input.split('.');
     let mut result = String::new();
@@ -77,69 +80,108 @@ fn short_version_from_spec(input: &str, length: u32) -> String {
     result
 }
 
-fn compute_hash_prefix(variant: &BTreeMap<String, String>, noarch: &NoArchType) -> String {
-    if noarch.is_python() {
-        return "py".to_string();
+/// The hash info for a given variant
+#[derive(Debug, PartialEq, Clone, Eq, Hash, Serialize, Deserialize)]
+pub struct HashInfo {
+    /// The hash (first 7 letters of the sha1sum)
+    pub hash: String,
+
+    /// The hash prefix (e.g. `py38` or `np111`)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+}
+
+/// Represents the input to compute the hash
+pub struct HashInput(String);
+
+impl HashInput {
+    /// Create a new hash input from a variant
+    pub fn from_variant(variant: &BTreeMap<NormalizedKey, Variable>) -> Self {
+        let mut buf = Vec::new();
+        let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonFormatter {});
+
+        // BTree has sorted keys, which is important for hashing
+        variant
+            .serialize(&mut ser)
+            .expect("Failed to serialize input");
+
+        Self(String::from_utf8(buf).expect("Failed to convert to string"))
     }
 
-    let mut map: HashMap<String, String> = HashMap::new();
-
-    for (variant_key, version_spec) in variant.iter() {
-        let prefix = match variant_key.as_str() {
-            "numpy" => "np",
-            "python" => "py",
-            "perl" => "pl",
-            "lua" => "lua",
-            "r" => "r",
-            _ => continue,
-        };
-
-        let version_length = match prefix {
-            "pl" => 3,
-            _ => 2,
-        };
-
-        map.insert(
-            prefix.to_string(),
-            short_version_from_spec(version_spec, version_length),
-        );
+    /// Get the hash input as a string
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 
-    let order = vec!["np", "py", "pl", "lua", "r", "mro"];
-    let mut result = String::new();
-    for key in order {
-        if let Some(value) = map.get(key) {
-            result.push_str(format!("{}{}", key, value).as_str());
+    /// Returns the hash input as bytes
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl std::fmt::Display for HashInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}h{}", self.prefix, self.hash)
+    }
+}
+
+impl HashInfo {
+    fn hash_prefix(variant: &BTreeMap<NormalizedKey, Variable>, noarch: &NoArchType) -> String {
+        if noarch.is_python() {
+            return "py".to_string();
+        }
+
+        let mut map: HashMap<String, String> = HashMap::new();
+
+        for (variant_key, version_spec) in variant.iter() {
+            let prefix = match variant_key.normalize().as_str() {
+                "numpy" => "np",
+                "python" => "py",
+                "perl" => "pl",
+                "lua" => "lua",
+                "r" => "r",
+                _ => continue,
+            };
+
+            let version_length = match prefix {
+                "pl" => 3,
+                _ => 2,
+            };
+
+            map.insert(
+                prefix.to_string(),
+                short_version_from_spec(&version_spec.to_string(), version_length),
+            );
+        }
+
+        let order = vec!["np", "py", "pl", "lua", "r", "mro"];
+        let mut result = String::new();
+        for key in order {
+            if let Some(value) = map.get(key) {
+                result.push_str(format!("{}{}", key, value).as_str());
+            }
+        }
+        result
+    }
+
+    fn hash_from_input(hash_input: &HashInput) -> String {
+        let mut hasher = Sha1::new();
+        hasher.update(hash_input.as_bytes());
+        let result = hasher.finalize();
+
+        const HASH_LENGTH: usize = 7;
+
+        let res = format!("{:x}", result);
+        res[..HASH_LENGTH].to_string()
+    }
+
+    /// Compute the build string for a given variant
+    pub fn from_variant(variant: &BTreeMap<NormalizedKey, Variable>, noarch: &NoArchType) -> Self {
+        Self {
+            hash: Self::hash_from_input(&HashInput::from_variant(variant)),
+            prefix: Self::hash_prefix(variant, noarch),
         }
     }
-    result
-}
-
-fn hash_variant(variant: &BTreeMap<String, String>) -> String {
-    let mut buf = Vec::new();
-    let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonFormatter {});
-
-    // BTree has sorted keys, which is important for hashing
-    variant
-        .serialize(&mut ser)
-        .expect("Failed to serialize input");
-
-    let string = String::from_utf8(buf).expect("Failed to convert to string");
-
-    let mut hasher = Sha1::new();
-    hasher.update(string.as_bytes());
-    let result = hasher.finalize();
-
-    const HASH_LENGTH: usize = 7;
-
-    let res = format!("h{:x}", result);
-    res[..HASH_LENGTH + 1].to_string()
-}
-
-pub fn compute_buildstring(variant: &BTreeMap<String, String>, noarch: &NoArchType) -> String {
-    let hash_prefix = compute_hash_prefix(variant, noarch);
-    let hash = hash_variant(variant);
-    format!("{}{}", hash_prefix, hash)
 }
 
 #[cfg(test)]
@@ -150,23 +192,20 @@ mod tests {
     #[test]
     fn test_hash() {
         let mut input = BTreeMap::new();
-        input.insert("rust_compiler".to_string(), "rust".to_string());
-        input.insert("build_platform".to_string(), "osx-64".to_string());
-        input.insert("c_compiler".to_string(), "clang".to_string());
-        input.insert("target_platform".to_string(), "osx-arm64".to_string());
-        input.insert("openssl".to_string(), "3".to_string());
+        input.insert("rust_compiler".into(), "rust".into());
+        input.insert("build_platform".into(), "osx-64".into());
+        input.insert("c_compiler".into(), "clang".into());
+        input.insert("target_platform".into(), "osx-arm64".into());
+        input.insert("openssl".into(), "3".into());
         input.insert(
-            "CONDA_BUILD_SYSROOT".to_string(),
-            "/Applications/Xcode_13.2.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX11.0.sdk".to_string(),
+            "CONDA_BUILD_SYSROOT".into(),
+            "/Applications/Xcode_13.2.1.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX11.0.sdk".into()
         );
-        input.insert(
-            "channel_targets".to_string(),
-            "conda-forge main".to_string(),
-        );
-        input.insert("python".to_string(), "3.11.* *_cpython".to_string());
-        input.insert("c_compiler_version".to_string(), "14".to_string());
+        input.insert("channel_targets".into(), "conda-forge main".into());
+        input.insert("python".into(), "3.11.* *_cpython".into());
+        input.insert("c_compiler_version".into(), "14".into());
 
-        let build_string_from_output = compute_buildstring(&input, &NoArchType::none());
-        assert_eq!(build_string_from_output, "py311h507f6e9");
+        let build_string_from_output = HashInfo::from_variant(&input, &NoArchType::none());
+        assert_eq!(build_string_from_output.to_string(), "py311h507f6e9");
     }
 }

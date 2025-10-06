@@ -1,0 +1,24 @@
+context:
+  name: llama.cpp
+  version: b1513
+
+package:
+  name: "${{ name|lower }}"
+  version: "${{ version }}"
+
+source:
+  git: https://github.com/ggerganov/llama.cpp.git
+  tag: "${{ version }}"
+
+build:
+  number: 0
+  script: cmake -B build
+
+requirements:
+  build:
+    - cmake
+about:
+  homepage: https://github.com/ggerganov/llama.cpp
+  license: MIT
+  license_file: LICENSE
+  summary: Port of Facebook's LLaMA model in C/C++

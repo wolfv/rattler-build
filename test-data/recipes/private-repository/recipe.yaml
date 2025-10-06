@@ -1,0 +1,7 @@
+package:
+  name: "_testpackage_requiring_private_repo"
+  version: "1"
+
+requirements:
+  build:
+    - private-package

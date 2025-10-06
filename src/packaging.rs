@@ -1,33 +1,50 @@
-use std::collections::HashSet;
-use std::io::{BufReader, Read, Write};
-use std::path::{Component, Path, PathBuf};
-use std::str::FromStr;
-use std::{fs, fs::File};
-
-#[cfg(target_family = "unix")]
-use std::os::unix::prelude::OsStrExt;
-
-#[cfg(target_family = "unix")]
-use std::os::unix::fs::symlink;
-
-use tempdir::TempDir;
-use walkdir::WalkDir;
-
-use rattler_conda_types::package::{
-    AboutJson, FileMode, LinkJson, NoArchLinks, PathType, PathsEntry, PrefixPlaceholder,
-    PythonEntryPoints,
+//! This module contains the functions to package a conda package from a given
+//! output.
+use std::{
+    collections::{HashMap, HashSet},
+    io::Write,
+    path::{Component, Path, PathBuf},
 };
-use rattler_conda_types::package::{IndexJson, PathsJson};
-use rattler_conda_types::{NoArchType, Platform, Version};
-use rattler_digest::compute_file_digest;
-use rattler_package_streaming::write::{write_tar_bz2_package, CompressionLevel};
 
-use crate::macos;
-use crate::metadata::Output;
-use crate::{linux, post};
+use fs_err as fs;
+use fs_err::File;
+use metadata::clean_url;
+use rattler_conda_types::{
+    ChannelUrl, Platform,
+    compression_level::CompressionLevel,
+    package::{ArchiveType, PackageFile, PathsJson},
+};
+use rattler_package_streaming::write::{write_conda_package, write_tar_bz2_package};
+use unicode_normalization::UnicodeNormalization;
 
+mod file_finder;
+mod file_mapper;
+mod metadata;
+pub use file_finder::{Files, TempFiles, content_type};
+pub use metadata::{contains_prefix_binary, contains_prefix_text, create_prefix_placeholder};
+use tempfile::NamedTempFile;
+
+use crate::{
+    metadata::Output,
+    package_test::write_test_files,
+    post_process,
+    recipe::parser::GlobVec,
+    source::{self, copy_dir},
+    tool_configuration,
+};
+
+#[allow(missing_docs)]
 #[derive(Debug, thiserror::Error)]
 pub enum PackagingError {
+    #[error("Serde error: {0}")]
+    SerdeError(#[from] serde_yaml::Error),
+
+    #[error("Failed to build glob from pattern")]
+    GlobError(#[from] globset::Error),
+
+    #[error("Build String is not yet set")]
+    BuildStringNotSet,
+
     #[error("Dependencies are not yet finalized / resolved")]
     DependenciesNotFinalized,
 
@@ -36,6 +53,9 @@ pub enum PackagingError {
 
     #[error("Could not strip a prefix from a Path")]
     StripPrefixError(#[from] std::path::StripPrefixError),
+
+    #[error("Found mixed Prefix placeholders in file (forward- vs backslashes)")]
+    MixedPrefixPlaceholders(PathBuf),
 
     #[error("Could not serialize JSON: {0}")]
     SerializationError(#[from] serde_json::Error),
@@ -46,561 +66,315 @@ pub enum PackagingError {
     #[error("Failed to parse version {0}")]
     VersionParseError(#[from] rattler_conda_types::ParseVersionError),
 
-    #[error("Failed to relink ELF file: {0}")]
-    LinuxRelinkError(#[from] linux::link::RelinkError),
+    #[error(transparent)]
+    RelinkError(#[from] crate::post_process::relink::RelinkError),
 
-    #[error("Failed to relink MachO file: {0}")]
-    MacOSRelinkError(#[from] macos::link::RelinkError),
+    #[error(transparent)]
+    SourceError(#[from] source::SourceError),
 
-    #[error("License file not found: {0}")]
-    LicenseFileNotFound(String),
+    #[error("could not create python entry point: {0}")]
+    CannotCreateEntryPoint(String),
 
-    #[error("Relink error: {0}")]
-    RelinkError(#[from] crate::post::RelinkError),
-}
+    #[error("linking check error: {0}")]
+    LinkingCheckError(#[from] crate::post_process::checks::LinkingCheckError),
 
-#[allow(unused_variables)]
-fn contains_prefix_binary(file_path: &Path, prefix: &Path) -> Result<bool, PackagingError> {
-    // Convert the prefix to a Vec<u8> for binary comparison
-    // TODO on Windows check both ascii and utf-8 / 16?
-    #[cfg(target_family = "windows")]
-    {
-        tracing::warn!("Windows is not supported yet for binary prefix checking.");
-        return Ok(false);
-    }
+    #[error("Failed to compile Python bytecode: {0}")]
+    PythonCompileError(String),
 
-    #[cfg(target_family = "unix")]
-    {
-        let prefix_bytes = prefix.as_os_str().as_bytes().to_vec();
+    #[error("Failed to find content type for file: {0:?}")]
+    ContentTypeNotFound(PathBuf),
 
-        // Open the file
-        let file = File::open(file_path)?;
-        let mut buf_reader = BufReader::new(file);
+    #[error("No license files were copied")]
+    LicensesNotFound,
 
-        // Read the file's content
-        let mut content = Vec::new();
-        buf_reader.read_to_end(&mut content)?;
+    #[error("Invalid Metadata: {0}")]
+    InvalidMetadata(String),
 
-        // Check if the content contains the prefix bytes
-        let contains_prefix = content
-            .windows(prefix_bytes.len())
-            .any(|window| window == prefix_bytes.as_slice());
-
-        Ok(contains_prefix)
-    }
-}
-
-fn contains_prefix_text(file_path: &Path, prefix: &Path) -> Result<bool, PackagingError> {
-    // Open the file
-    let file = File::open(file_path)?;
-    let mut buf_reader = BufReader::new(file);
-
-    // Read the file's content
-    let mut content = String::new();
-    buf_reader.read_to_string(&mut content)?;
-
-    // Check if the content contains the prefix
-    let prefix = prefix.to_string_lossy().to_string();
-    let contains_prefix = content.contains(&prefix);
-
-    Ok(contains_prefix)
-}
-
-fn create_prefix_placeholder(
-    file_path: &Path,
-    prefix: &Path,
-) -> Result<Option<PrefixPlaceholder>, PackagingError> {
-    // exclude pyc and pyo files from prefix replacement
-    if let Some(ext) = file_path.extension() {
-        if ext == "pyc" || ext == "pyo" {
-            return Ok(None);
-        }
-    }
-    // read first 1024 bytes to determine file type
-    let mut file = File::open(file_path)?;
-    let mut buffer = [0; 1024];
-    let n = file.read(&mut buffer)?;
-    let buffer = &buffer[..n];
-
-    let content_type = content_inspector::inspect(buffer);
-    let mut has_prefix = None;
-
-    let file_mode = if content_type.is_text() {
-        if contains_prefix_text(file_path, prefix)? {
-            has_prefix = Some(prefix.to_path_buf());
-        }
-        FileMode::Text
-    } else {
-        if contains_prefix_binary(file_path, prefix)? {
-            has_prefix = Some(prefix.to_path_buf());
-        }
-        FileMode::Binary
-    };
-
-    if let Some(prefix_placeholder) = has_prefix {
-        Ok(Some(PrefixPlaceholder {
-            file_mode,
-            placeholder: prefix_placeholder.to_string_lossy().to_string(),
-        }))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Create a `paths.json` file for the given paths.
-/// Paths should be given as absolute paths under the `path_prefix` directory.
-/// This function will also determine if the file is binary or text, and if it contains the prefix.
-fn create_paths_json(
-    paths: &HashSet<PathBuf>,
-    path_prefix: &Path,
-    encoded_prefix: &Path,
-) -> Result<String, PackagingError> {
-    let mut paths_json: PathsJson = PathsJson {
-        paths: Vec::new(),
-        paths_version: 1,
-    };
-
-    for p in itertools::sorted(paths) {
-        let meta = fs::symlink_metadata(p)?;
-
-        let relative_path = p.strip_prefix(path_prefix)?.to_path_buf();
-
-        tracing::info!("Adding {:?}", &relative_path);
-        if !p.exists() {
-            if p.is_symlink() {
-                tracing::warn!(
-                    "Symlink target does not exist: {:?} -> {:?}",
-                    &p,
-                    fs::read_link(p)?
-                );
-                continue;
-            }
-            tracing::warn!("File does not exist: {:?} (TODO)", &p);
-            continue;
-        }
-
-        if meta.is_dir() {
-            // check if dir is empty, and only then add it to paths.json
-            // TODO figure out under which conditions we should add empty dirs to paths.json
-            // let mut entries = fs::read_dir(p)?;
-            // if entries.next().is_none() {
-            //     let path_entry = PathsEntry {
-            //         sha256: None,
-            //         relative_path,
-            //         path_type: PathType::Directory,
-            //         // TODO put this away?
-            //         file_mode: FileMode::Binary,
-            //         prefix_placeholder: None,
-            //         no_link: false,
-            //         size_in_bytes: None,
-            //     };
-            //     paths_json.paths.push(path_entry);
-            // }
-        } else if meta.is_file() {
-            let prefix_placeholder = create_prefix_placeholder(p, encoded_prefix)?;
-
-            let digest = compute_file_digest::<sha2::Sha256>(p)?;
-
-            paths_json.paths.push(PathsEntry {
-                sha256: Some(digest),
-                relative_path,
-                path_type: PathType::HardLink,
-                prefix_placeholder,
-                no_link: false,
-                size_in_bytes: Some(meta.len()),
-            });
-        } else if meta.file_type().is_symlink() {
-            let digest = compute_file_digest::<sha2::Sha256>(p)?;
-
-            paths_json.paths.push(PathsEntry {
-                sha256: Some(digest),
-                relative_path,
-                path_type: PathType::SoftLink,
-                prefix_placeholder: None,
-                no_link: false,
-                size_in_bytes: Some(meta.len()),
-            });
-        }
-    }
-    Ok(serde_json::to_string_pretty(&paths_json)?)
-}
-
-/// Create the index.json file for the given output.
-fn create_index_json(output: &Output) -> Result<String, PackagingError> {
-    let recipe = &output.recipe;
-
-    let (platform, arch) = match output.build_configuration.target_platform {
-        Platform::NoArch => (None, None),
-        p => {
-            // TODO add better functions in rattler for this
-            let pstring = p.to_string();
-            let parts: Vec<&str> = pstring.split('-').collect();
-            let (platform, arch) = (String::from(parts[0]), String::from(parts[1]));
-
-            match arch.as_str() {
-                "64" => (Some(platform), Some("x86_64".to_string())),
-                "32" => (Some(platform), Some("x86".to_string())),
-                _ => (Some(platform), Some(arch)),
-            }
-        }
-    };
-
-    let index_json = IndexJson {
-        name: output.name().to_string(),
-        version: Version::from_str(output.version())?,
-        build: output.build_string().to_string(),
-        build_number: recipe.build.number,
-        arch,
-        platform,
-        subdir: Some(output.build_configuration.target_platform.to_string()),
-        license: recipe.about.license.clone(),
-        license_family: recipe.about.license_family.clone(),
-        timestamp: Some(output.build_configuration.timestamp),
-        depends: output
-            .finalized_dependencies
-            .clone()
-            .unwrap()
-            .run
-            .depends
-            .iter()
-            .map(|d| d.spec().to_string())
-            .collect(),
-        constrains: output
-            .finalized_dependencies
-            .clone()
-            .unwrap()
-            .run
-            .constrains
-            .iter()
-            .map(|d| d.spec().to_string())
-            .collect(),
-        noarch: recipe.build.noarch,
-        track_features: vec![],
-        features: None,
-    };
-
-    Ok(serde_json::to_string_pretty(&index_json)?)
-}
-
-/// Create the about.json file for the given output.
-fn create_about_json(output: &Output) -> Result<String, PackagingError> {
-    let recipe = &output.recipe;
-    let about_json = AboutJson {
-        home: recipe.about.home.clone().unwrap_or_default(),
-        license: recipe.about.license.clone(),
-        license_family: recipe.about.license_family.clone(),
-        summary: recipe.about.summary.clone(),
-        description: recipe.about.description.clone(),
-        doc_url: recipe.about.doc_url.clone().unwrap_or_default(),
-        dev_url: recipe.about.dev_url.clone().unwrap_or_default(),
-        // TODO ?
-        source_url: None,
-        channels: output.build_configuration.channels.clone(),
-    };
-
-    Ok(serde_json::to_string_pretty(&about_json)?)
-}
-
-/// Create the run_exports.json file for the given output.
-fn create_run_exports_json(output: &Output) -> Result<Option<String>, PackagingError> {
-    if let Some(run_exports) = &output
-        .finalized_dependencies
-        .as_ref()
-        .unwrap()
-        .run
-        .run_exports
-    {
-        Ok(Some(serde_json::to_string_pretty(run_exports)?))
-    } else {
-        Ok(None)
-    }
-}
-
-/// This function returns a HashSet of (recursively) all the files in the given directory.
-pub fn record_files(directory: &PathBuf) -> Result<HashSet<PathBuf>, PackagingError> {
-    let mut res = HashSet::new();
-    for entry in WalkDir::new(directory) {
-        res.insert(entry?.path().to_owned());
-    }
-    Ok(res)
-}
-
-/// This function copies the given file to the destination folder and
-/// transforms it on the way if needed.
-///
-/// * For `noarch: python` packages, the "lib/pythonX.X" prefix is stripped so that only
-///   the "site-packages" part is kept. Additionally, any `__pycache__` directories or
-///  `.pyc` files are skipped.
-/// * For `noarch: python` packages, furthermore `bin` is replaced with `python-scripts`, and
-///   `Scripts` is replaced with `python-scripts` (on Windows only). All other files are included
-///   as-is.
-/// * Absolute symlinks are made relative so that they are easily relocatable.
-fn write_to_dest(
-    path: &Path,
-    prefix: &Path,
-    dest_folder: &Path,
-    target_platform: &Platform,
-    noarch_type: &NoArchType,
-) -> Result<Option<PathBuf>, PackagingError> {
-    let path_rel = path.strip_prefix(prefix)?;
-    let mut dest_path = dest_folder.join(path_rel);
-
-    if noarch_type.is_python() {
-        let ext = path.extension().unwrap_or_default();
-        if ext == "pyc" || ext == "pyo" {
-            return Ok(None); // skip .pyc files
-        }
-
-        // if any part of the path is __pycache__ skip it
-        if path_rel
-            .components()
-            .any(|c| c == Component::Normal("__pycache__".as_ref()))
-        {
-            return Ok(None);
-        }
-
-        if path_rel
-            .components()
-            .any(|c| c == Component::Normal("site-packages".as_ref()))
-        {
-            // check if site-packages is in the path and strip everything before it
-            let pat = std::path::Component::Normal("site-packages".as_ref());
-            let parts = path_rel.components();
-            let mut new_parts = Vec::new();
-            let mut found = false;
-            for part in parts {
-                if part == pat {
-                    found = true;
-                }
-                if found {
-                    new_parts.push(part);
-                }
-            }
-
-            dest_path = dest_folder.join(PathBuf::from_iter(new_parts));
-        } else if path.starts_with("bin") || path.starts_with("Scripts") {
-            // replace bin with python-scripts
-            let mut new_parts = path_rel.components().collect::<Vec<_>>();
-            new_parts[0] = Component::Normal("python-scripts".as_ref());
-            dest_path = dest_folder.join(PathBuf::from_iter(new_parts));
-        } else {
-            // keep everything else as-is
-            dest_path = dest_folder.join(path_rel);
-        }
-    }
-
-    match dest_path.parent() {
-        Some(parent) => {
-            if fs::metadata(parent).is_err() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-        None => {
-            return Err(PackagingError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Could not get parent directory",
-            )));
-        }
-    }
-
-    let metadata = fs::symlink_metadata(path)?;
-
-    // make absolute symlinks relative
-    if metadata.is_symlink() {
-        if target_platform.is_windows() {
-            tracing::warn!("Symlinks need administrator privileges on Windows");
-        }
-
-        if let Result::Ok(link) = fs::read_link(path) {
-            tracing::trace!("Copying link: {:?} -> {:?}", path, link);
-        } else {
-            tracing::warn!("Could not read link at {:?}", path);
-        }
-
-        #[cfg(target_family = "unix")]
-        fs::read_link(path).and_then(|target| {
-            if target.is_absolute() && target.starts_with(prefix) {
-                let rel_target = pathdiff::diff_paths(
-                    target,
-                    path.parent().ok_or(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "Could not get parent directory",
-                    ))?,
-                )
-                .ok_or(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "Could not get relative path",
-                ))?;
-
-                tracing::trace!(
-                    "Making symlink relative {:?} -> {:?}",
-                    dest_path,
-                    rel_target
-                );
-                symlink(&rel_target, &dest_path).map_err(|e| {
-                    tracing::error!(
-                        "Could not create symlink from {:?} to {:?}: {:?}",
-                        rel_target,
-                        dest_path,
-                        e
-                    );
-                    e
-                })?;
-            } else {
-                if target.is_absolute() {
-                    tracing::warn!("Symlink {:?} points outside of the prefix", path);
-                }
-                symlink(&target, &dest_path).map_err(|e| {
-                    tracing::error!(
-                        "Could not create symlink from {:?} to {:?}: {:?}",
-                        target,
-                        dest_path,
-                        e
-                    );
-                    e
-                })?;
-            }
-            Result::Ok(())
-        })?;
-        Ok(Some(dest_path))
-    } else if metadata.is_dir() {
-        // skip directories for now
-        Ok(None)
-    } else {
-        tracing::trace!("Copying file {:?} to {:?}", path, dest_path);
-        fs::copy(path, &dest_path)?;
-        Ok(Some(dest_path))
-    }
-}
-
-/// This function creates a link.json file for the given output.
-fn create_link_json(output: &Output) -> Result<Option<String>, PackagingError> {
-    let noarch_links = PythonEntryPoints {
-        entry_points: output.recipe.build.entry_points.clone(),
-    };
-
-    let link_json = LinkJson {
-        noarch: NoArchLinks::Python(noarch_links),
-        package_metadata_version: 1,
-    };
-
-    Ok(Some(serde_json::to_string_pretty(&link_json)?))
+    #[error("Invalid MenuInst schema file: {0} - {1}")]
+    InvalidMenuInstSchema(PathBuf, serde_json::Error),
 }
 
 /// This function copies the license files to the info/licenses folder.
+/// License files are selected from the recipe directory and the source (work) folder.
+/// If the same file is found in both locations, the file from the recipe directory is used.
 fn copy_license_files(
     output: &Output,
     tmp_dir_path: &Path,
-) -> Result<Option<Vec<PathBuf>>, PackagingError> {
-    if let Some(license_files) = &output.recipe.about.license_file {
+) -> Result<Option<HashSet<PathBuf>>, PackagingError> {
+    if output.recipe.about().license_file.is_empty() {
+        Ok(None)
+    } else {
         let licenses_folder = tmp_dir_path.join("info/licenses/");
         fs::create_dir_all(&licenses_folder)?;
-        let mut copied_files = Vec::new();
-        for license in license_files {
-            // license file can be found either in the recipe folder or in the source folder
-            let candidates = vec![
-                output
-                    .build_configuration
-                    .directories
-                    .recipe_dir
-                    .join(license),
-                output
-                    .build_configuration
-                    .directories
-                    .work_dir
-                    .join(license),
-            ];
 
-            let found = candidates.iter().find(|c| c.exists());
-            if let Some(license_file) = found {
-                if license_file.is_dir() {
-                    todo!("License file is a directory");
-                }
-                let dest = licenses_folder.join(license);
-                fs::copy(license_file, &dest)?;
-                copied_files.push(dest);
-            } else {
-                return Err(PackagingError::LicenseFileNotFound(license.clone()));
+        let copy_dir_work = copy_dir::CopyDir::new(
+            &output.build_configuration.directories.work_dir,
+            &licenses_folder,
+        )
+        .with_globvec(&output.recipe.about().license_file)
+        .use_gitignore(false)
+        .run()?;
+
+        let copied_files_work_dir = copy_dir_work.copied_paths();
+
+        let copy_dir_recipe = copy_dir::CopyDir::new(
+            &output.build_configuration.directories.recipe_dir,
+            &licenses_folder,
+        )
+        .with_globvec(&output.recipe.about().license_file)
+        .use_gitignore(false)
+        .overwrite(true)
+        .run()?;
+
+        let copied_files_recipe_dir = copy_dir_recipe.copied_paths();
+
+        // if a file was copied from the recipe dir, and the work dir, we should
+        // issue a warning
+        for file in copied_files_recipe_dir {
+            if copied_files_work_dir.contains(file) {
+                let warn_str = format!(
+                    "License file from source directory was overwritten by license file from recipe folder ({})",
+                    file.display()
+                );
+                tracing::warn!(warn_str);
+                output.record_warning(&warn_str);
             }
         }
-        Ok(Some(copied_files))
-    } else {
-        Ok(None)
-    }
-}
 
-/// We check that each `pyc` file in the package is also present as a `py` file.
-/// This is a temporary measure to avoid packaging `pyc` files that are not
-/// generated by the build process.
-fn filter_pyc(path: &Path, new_files: &HashSet<PathBuf>) -> bool {
-    if let (Some(ext), Some(parent)) = (path.extension(), path.parent()) {
-        if ext == "pyc" {
-            let has_pycache = parent.ends_with("__pycache__");
-            let pyfile = if has_pycache {
-                // a pyc file with a pycache parent should be removed
-                // replace two last dots with .py
-                // these paths look like .../__pycache__/file_dependency.cpython-311.pyc
-                // where the `file_dependency.py` path would be found in the parent directory from __pycache__
-                let stem = path.file_name().unwrap().to_string_lossy().to_string();
-                let py_stem = stem.rsplitn(3, '.').last().unwrap_or_default();
-                if let Some(pp) = parent.parent() {
-                    pp.join(format!("{}.py", py_stem))
+        let copied_files = copied_files_recipe_dir
+            .iter()
+            .chain(copied_files_work_dir)
+            .map(PathBuf::from)
+            .collect::<HashSet<PathBuf>>();
+
+        // Check which globs didn't match any files
+        let mut missing_globs = Vec::new();
+
+        // Check globs from both work and recipe dir results
+        for (glob_str, match_obj) in copy_dir_work.include_globs() {
+            if !match_obj.get_matched() {
+                // Check if it matched in the recipe dir
+                if let Some(recipe_match) = copy_dir_recipe.include_globs().get(glob_str) {
+                    if !recipe_match.get_matched() {
+                        missing_globs.push(glob_str.clone());
+                    }
                 } else {
-                    return true;
+                    missing_globs.push(glob_str.clone());
                 }
-            } else {
-                path.with_extension("py")
-            };
-
-            if !new_files.contains(&pyfile) {
-                return true;
             }
         }
+
+        if !missing_globs.is_empty() {
+            let error_str = format!(
+                "The following license files were not found: {}",
+                missing_globs.join(", ")
+            );
+            tracing::error!(error_str);
+            return Err(PackagingError::LicensesNotFound);
+        }
+
+        if copied_files.is_empty() {
+            Err(PackagingError::LicensesNotFound)
+        } else {
+            Ok(Some(copied_files))
+        }
     }
-    false
 }
 
-fn write_test_files(output: &Output, tmp_dir_path: &Path) -> Result<Vec<PathBuf>, PackagingError> {
-    let mut test_files = Vec::new();
-    if let Some(test) = &output.recipe.test {
-        let test_folder = tmp_dir_path.join("info/test/");
-        fs::create_dir_all(&test_folder)?;
+fn write_recipe_folder(
+    output: &Output,
+    tmp_dir_path: &Path,
+) -> Result<Vec<PathBuf>, PackagingError> {
+    let recipe_folder = tmp_dir_path.join("info/recipe/");
+    let recipe_dir = &output.build_configuration.directories.recipe_dir;
+    let recipe_path = &output.build_configuration.directories.recipe_path;
+    let output_dir = &output.build_configuration.directories.output_dir;
 
-        if let Some(import_test) = &test.imports {
-            let test_file = test_folder.join("run_test.py");
-            let mut file = File::create(&test_file)?;
-            for el in import_test {
-                writeln!(file, "import {}\n", el)?;
+    let mut copy_builder = copy_dir::CopyDir::new(recipe_dir, &recipe_folder)
+        .use_gitignore(true)
+        .ignore_hidden_files(true);
+
+    // if the output dir is inside the same directory as the recipe, then we
+    // need to ignore the output dir when copying
+    if let Ok(ignore_output) = output_dir.strip_prefix(recipe_dir) {
+        tracing::info!(
+            "Ignoring output dir in recipe folder: {}",
+            output_dir.to_string_lossy()
+        );
+        let output_dir_glob = format!("{}/**", ignore_output.to_string_lossy());
+        let glob_vec = GlobVec::from_vec(vec![], Some(vec![&output_dir_glob]));
+        copy_builder = copy_builder.with_globvec(&glob_vec);
+    }
+
+    let copy_result = copy_builder.run()?;
+
+    let mut files = Vec::from(copy_result.copied_paths());
+
+    // Make sure that the recipe file is "recipe.yaml" in `info/recipe/`
+    if recipe_path.file_name() != Some("recipe.yaml".as_ref()) {
+        if let Some(name) = recipe_path.file_name() {
+            fs::rename(recipe_folder.join(name), recipe_folder.join("recipe.yaml"))?;
+            // Update the existing entry with the new recipe file.
+            if let Some(pos) = files.iter().position(|x| x == &recipe_folder.join(name)) {
+                files[pos] = recipe_folder.join("recipe.yaml");
             }
-            test_files.push(test_file);
-        }
-
-        if let Some(commands) = &test.commands {
-            let test_file = test_folder.join("run_test.sh");
-            let mut file = File::create(&test_file)?;
-            for el in commands {
-                writeln!(file, "{}\n", el)?;
-            }
-            test_files.push(test_file);
-        }
-
-        if let Some(test_dependencies) = &test.requires {
-            let test_file = test_folder.join("test_time_dependencies.json");
-            let mut file = File::create(&test_file)?;
-            file.write_all(serde_json::to_string(test_dependencies)?.as_bytes())?;
-            test_files.push(test_file);
-        }
-
-        if let Some(_test_files) = &test.files {
-            todo!("Test files is not yet implemented!");
-        }
-
-        if let Some(_test_source_files) = &test.source_files {
-            todo!("Test files is not yet implemented!");
         }
     }
 
-    Ok(test_files)
+    // write the variant config to the appropriate file
+    let variant_config_file = recipe_folder.join("variant_config.yaml");
+    let mut variant_config = File::create(&variant_config_file)?;
+    variant_config
+        .write_all(serde_yaml::to_string(&output.build_configuration.variant)?.as_bytes())?;
+    files.push(variant_config_file);
+
+    let mut output_clean = output.clone();
+    // clean URLs of any secrets or tokens
+    output_clean.build_configuration.channels = output_clean
+        .build_configuration
+        .channels
+        .iter()
+        .map(clean_url)
+        .map(|url| ChannelUrl::from(url.parse::<url::Url>().expect("url is valid")))
+        .collect();
+
+    // Write out the "rendered" recipe as well (the recipe with all the variables
+    // replaced with their values)
+    let rendered_recipe_file = recipe_folder.join("rendered_recipe.yaml");
+    let mut rendered_recipe = File::create(&rendered_recipe_file)?;
+    rendered_recipe.write_all(serde_yaml::to_string(&output_clean)?.as_bytes())?;
+    files.push(rendered_recipe_file);
+
+    Ok(files)
+}
+
+struct ProgressBar {
+    progress_bar: indicatif::ProgressBar,
+}
+
+impl rattler_package_streaming::write::ProgressBar for ProgressBar {
+    fn set_progress(&mut self, progress: u64, message: &str) {
+        self.progress_bar.set_position(progress);
+        self.progress_bar.set_message(message.to_string());
+    }
+
+    fn set_total(&mut self, total: u64) {
+        self.progress_bar.set_length(total);
+    }
+}
+
+/// Error type for path normalization operations
+#[derive(Debug, thiserror::Error)]
+pub enum PathNormalizationError {
+    /// Error when a path component contains invalid Unicode
+    #[error("Path component contains invalid Unicode: {0}")]
+    InvalidUnicode(String),
+}
+
+/// Normalizes a component string for comparison.
+///
+/// This helper function applies Unicode normalization (NFKC) and optional case folding to a path component.
+/// When case folding is applied, it's done in a way that properly handles special Unicode cases.
+fn normalize_component(component_str: &str, to_lowercase: bool) -> String {
+    if to_lowercase {
+        let normalized = component_str.nfkc().collect::<String>();
+        normalized.to_uppercase().to_lowercase()
+    } else {
+        component_str.nfkc().collect::<String>()
+    }
+}
+
+/// Normalizes a path for case-insensitive comparison.
+///
+/// This function:
+/// 1. Applies Unicode normalization (NFKC) to each path component
+/// 2. Handles path separators consistently across platforms
+/// 3. Optionally converts to lowercase for case-insensitive comparison
+///
+/// Returns a normalized string representation of the path.
+fn normalize_path_for_comparison(
+    path: &Path,
+    to_lowercase: bool,
+) -> Result<String, PathNormalizationError> {
+    let estimated_capacity = path.as_os_str().len() * 6 / 5 + path.components().count();
+    let mut normalized = String::with_capacity(estimated_capacity);
+
+    let separator = '/';
+
+    for c in path.components() {
+        match c {
+            Component::CurDir => continue,
+            Component::RootDir => {
+                normalized.push(separator);
+            }
+            Component::Prefix(_) | Component::ParentDir | Component::Normal(_) => {
+                if !normalized.is_empty() && !normalized.ends_with(separator) {
+                    normalized.push(separator);
+                }
+
+                let os_str = match c {
+                    Component::Prefix(p) => p.as_os_str(),
+                    _ => c.as_os_str(),
+                };
+
+                let component_str = os_str.to_str().ok_or_else(|| {
+                    PathNormalizationError::InvalidUnicode(format!(
+                        "Path component contains invalid Unicode: {}",
+                        os_str.to_string_lossy()
+                    ))
+                })?;
+
+                normalized.push_str(&normalize_component(component_str, to_lowercase));
+            }
+        }
+    }
+
+    Ok(normalized)
+}
+
+/// Finds paths that would collide on case-insensitive filesystems.
+///
+/// Returns groups of paths that differ only by case.
+pub fn find_case_insensitive_collisions<I, P>(paths: I) -> Vec<Vec<PathBuf>>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let mut lc_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+
+    for path_ref in paths {
+        let path = path_ref.as_ref();
+        let case_folded = normalize_path_for_comparison(path, true).unwrap_or_else(|err| {
+            tracing::warn!(
+                "Failed to normalize path for comparison: {}: {}",
+                path.display(),
+                err
+            );
+            path.display().to_string().to_lowercase()
+        });
+
+        lc_map
+            .entry(case_folded)
+            .or_default()
+            .push(path.to_path_buf());
+    }
+
+    let mut result: Vec<Vec<PathBuf>> = lc_map
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .map(|group| {
+            let mut unique_paths: Vec<PathBuf> = group
+                .into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            unique_paths.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+            unique_paths
+        })
+        .collect();
+
+    result.sort_by(|a, b| a[0].as_os_str().cmp(b[0].as_os_str()));
+    result
 }
 
 /// Given an output and a set of new files, create a conda package.
@@ -611,142 +385,435 @@ fn write_test_files(output: &Output, tmp_dir_path: &Path) -> Result<Vec<PathBuf>
 /// The `local_channel_dir` is the path to the local channel / output directory.
 pub fn package_conda(
     output: &Output,
-    new_files: &HashSet<PathBuf>,
-    prefix: &Path,
-    local_channel_dir: &Path,
-) -> Result<PathBuf, PackagingError> {
+    tool_configuration: &tool_configuration::Configuration,
+    files: &Files,
+) -> Result<(PathBuf, PathsJson), PackagingError> {
+    let local_channel_dir = &output.build_configuration.directories.output_dir;
+    let packaging_settings = &output.build_configuration.packaging_settings;
+
     if output.finalized_dependencies.is_none() {
         return Err(PackagingError::DependenciesNotFinalized);
     }
 
-    let tmp_dir = TempDir::new(output.name())?;
-    let tmp_dir_path = tmp_dir.path();
-
-    let mut tmp_files = HashSet::new();
-    for f in new_files {
-        // temporary measure to remove pyc files that are not supposed to be there
-        if filter_pyc(f, new_files) {
-            continue;
-        }
-
-        if output.recipe.build.noarch.is_python() {
-            // we need to remove files in bin/ that are registered as entry points
-            if f.starts_with("bin") {
-                if let Some(name) = f.file_name() {
-                    if output
-                        .recipe
-                        .build
-                        .entry_points
-                        .iter()
-                        .any(|ep| ep.command == name.to_string_lossy())
-                    {
-                        continue;
-                    }
-                }
-            }
-            // Windows
-            else if f.starts_with("Scripts") {
-                if let Some(name) = f.file_name() {
-                    if output.recipe.build.entry_points.iter().any(|ep| {
-                        format!("{}.exe", ep.command) == name.to_string_lossy()
-                            || format!("{}-script.py", ep.command) == name.to_string_lossy()
-                    }) {
-                        continue;
-                    }
-                }
-            }
-        }
-
-        if let Some(dest_file) = write_to_dest(
-            f,
-            prefix,
-            tmp_dir_path,
-            &output.build_configuration.target_platform,
-            &output.recipe.build.noarch,
-        )? {
-            tmp_files.insert(dest_file);
-        }
-    }
+    let mut tmp = files.to_temp_folder(output)?;
 
     tracing::info!("Copying done!");
 
-    if output.build_configuration.target_platform != Platform::NoArch {
-        post::relink(
-            &tmp_files,
-            tmp_dir_path,
-            prefix,
-            &output.build_configuration.target_platform,
-        )?;
+    post_process::relink::relink(&tmp, output)?;
+
+    post_process::menuinst::menuinst(&tmp)?;
+
+    tmp.add_files(post_process::python::python(&tmp, output)?);
+
+    post_process::regex_replacements::regex_post_process(&tmp, output)?;
+
+    tracing::info!("Post-processing done!");
+
+    let info_folder = tmp.temp_dir.path().join("info");
+
+    tracing::info!("Writing test files");
+    let test_files = write_test_files(output, tmp.temp_dir.path())?;
+    tmp.add_files(test_files);
+
+    tracing::info!("Writing metadata for package");
+    tmp.add_files(output.write_metadata(&tmp)?);
+
+    // TODO move things below also to metadata.rs
+    tracing::info!("Copying license files");
+    if let Some(license_files) = copy_license_files(output, tmp.temp_dir.path())? {
+        tmp.add_files(license_files);
     }
 
-    tracing::info!("Relink done!");
-
-    let info_folder = tmp_dir_path.join("info");
-    fs::create_dir_all(&info_folder)?;
-
-    let mut paths_json = File::create(info_folder.join("paths.json"))?;
-    paths_json.write_all(create_paths_json(&tmp_files, tmp_dir_path, prefix)?.as_bytes())?;
-    tmp_files.insert(info_folder.join("paths.json"));
-
-    let mut index_json = File::create(info_folder.join("index.json"))?;
-    index_json.write_all(create_index_json(output)?.as_bytes())?;
-    tmp_files.insert(info_folder.join("index.json"));
-
-    let mut about_json = File::create(info_folder.join("about.json"))?;
-    about_json.write_all(create_about_json(output)?.as_bytes())?;
-    tmp_files.insert(info_folder.join("about.json"));
-
-    if let Some(run_exports) = create_run_exports_json(output)? {
-        let mut run_exports_json = File::create(info_folder.join("run_exports.json"))?;
-        run_exports_json.write_all(run_exports.as_bytes())?;
-        tmp_files.insert(info_folder.join("run_exports.json"));
+    tracing::info!("Copying recipe files");
+    if output.build_configuration.store_recipe {
+        let recipe_files = write_recipe_folder(output, tmp.temp_dir.path())?;
+        tmp.add_files(recipe_files);
     }
 
-    if let Some(license_files) = copy_license_files(output, tmp_dir_path)? {
-        tmp_files.extend(license_files);
+    tracing::info!("Creating entry points");
+    // create any entry points or link.json for noarch packages
+    if output.recipe.build().is_python_version_independent() {
+        let link_json = File::create(info_folder.join("link.json"))?;
+        serde_json::to_writer_pretty(link_json, &output.link_json()?)?;
+        tmp.add_files(vec![info_folder.join("link.json")]);
     }
 
-    let mut variant_config = File::create(info_folder.join("hash_input.json"))?;
-    variant_config
-        .write_all(serde_json::to_string_pretty(&output.build_configuration.variant)?.as_bytes())?;
-
-    // TODO write recipe to info/recipe/ folder
-
-    let test_files = write_test_files(output, tmp_dir_path)?;
-    tmp_files.extend(test_files);
-
-    if output.recipe.build.noarch.is_python() {
-        if let Some(link) = create_link_json(output)? {
-            let mut link_json = File::create(info_folder.join("link.json"))?;
-            link_json.write_all(link.as_bytes())?;
-            tmp_files.insert(info_folder.join("link.json"));
+    // print sorted files
+    tracing::info!("\nFiles in package:\n");
+    let mut files = tmp
+        .files
+        .iter()
+        .map(|x| x.strip_prefix(tmp.temp_dir.path()))
+        .collect::<Result<Vec<_>, _>>()?;
+    files.sort_by(|a, b| {
+        let a_is_info = a.components().next() == Some(Component::Normal("info".as_ref()));
+        let b_is_info = b.components().next() == Some(Component::Normal("info".as_ref()));
+        match (a_is_info, b_is_info) {
+            (true, true) | (false, false) => a.cmp(b),
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
         }
+    });
+
+    for group in find_case_insensitive_collisions(&files) {
+        let list = group
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n  - ");
+        let warn_str = format!(
+            "Mixed-case filenames detected, case-insensitive filesystems may break:\n  - {}",
+            list
+        );
+        tracing::error!(warn_str);
+        output.record_warning(&warn_str);
     }
+
+    let normalize_path = |p: &Path| -> String { p.display().to_string().replace('\\', "/") };
+
+    files.iter().for_each(|f| {
+        if f.components().next() == Some(Component::Normal("info".as_ref())) {
+            tracing::info!("  - {}", console::style(normalize_path(f)).dim())
+        } else {
+            tracing::info!("  - {}", normalize_path(f))
+        }
+    });
 
     let output_folder =
         local_channel_dir.join(output.build_configuration.target_platform.to_string());
-    tracing::info!("Creating target folder {:?}", output_folder);
+    tracing::info!("Creating target folder '{}'", output_folder.display());
 
-    // make dirs
     fs::create_dir_all(&output_folder)?;
 
-    // TODO get proper hash
-    let file = format!(
-        "{}-{}-{}.tar.bz2",
-        output.name(),
-        output.version(),
-        output.build_string()
+    if let Platform::NoArch = output.build_configuration.target_platform {
+        create_empty_build_folder(
+            local_channel_dir,
+            &output.build_configuration.build_platform.platform,
+        )?;
+    }
+
+    let identifier = output.identifier();
+    let tempfile_in_output = NamedTempFile::new_in(&output_folder)?;
+
+    let final_name = output_folder.join(format!(
+        "{}{}",
+        identifier,
+        packaging_settings.archive_type.extension()
+    ));
+
+    tracing::info!("Compressing archive...");
+
+    let progress_bar = tool_configuration.fancy_log_handler.add_progress_bar(
+        indicatif::ProgressBar::new(0)
+            .with_prefix("Compressing ")
+            .with_style(tool_configuration.fancy_log_handler.default_bytes_style()),
     );
 
-    let out_path = output_folder.join(file);
-    let file = File::create(&out_path)?;
-    write_tar_bz2_package(
-        file,
-        tmp_dir_path,
-        &tmp_files.into_iter().collect::<Vec<_>>(),
-        CompressionLevel::Default,
-        Some(&output.build_configuration.timestamp),
-    )?;
+    match packaging_settings.archive_type {
+        ArchiveType::TarBz2 => {
+            write_tar_bz2_package(
+                tempfile_in_output.as_file(),
+                tmp.temp_dir.path(),
+                &tmp.files.iter().cloned().collect::<Vec<_>>(),
+                CompressionLevel::Numeric(packaging_settings.compression_level),
+                Some(&output.build_configuration.timestamp),
+                Some(Box::new(ProgressBar { progress_bar })),
+            )?;
+        }
+        ArchiveType::Conda => {
+            write_conda_package(
+                tempfile_in_output.as_file(),
+                tmp.temp_dir.path(),
+                &tmp.files.iter().cloned().collect::<Vec<_>>(),
+                CompressionLevel::Numeric(packaging_settings.compression_level),
+                tool_configuration.compression_threads,
+                &identifier,
+                Some(&output.build_configuration.timestamp),
+                Some(Box::new(ProgressBar { progress_bar })),
+            )?;
+        }
+    }
 
-    Ok(out_path)
+    // Atomically move the file to the final location
+    tempfile_in_output
+        .persist(&final_name)
+        .map_err(|e| e.error)?;
+    tracing::info!("Archive written to '{}'", final_name.display());
+
+    let paths_json = PathsJson::from_path(info_folder.join("paths.json"))?;
+    Ok((final_name, paths_json))
+}
+
+/// When building package for noarch, we don't create another build-platform
+/// folder together with noarch but conda-build does
+/// because of this we have a failure in conda-smithy CI so we also *mimic* this
+/// behaviour until this behaviour is changed
+/// https://github.com/conda-forge/conda-forge-ci-setup-feedstock/blob/main/recipe/conda_forge_ci_setup/feedstock_outputs.py#L164
+fn create_empty_build_folder(
+    local_channel_dir: &Path,
+    build_platform: &Platform,
+) -> miette::Result<(), PackagingError> {
+    let build_output_folder = local_channel_dir.join(build_platform.to_string());
+
+    tracing::info!("Creating empty build folder {:?}", build_output_folder);
+
+    fs::create_dir_all(&build_output_folder)?;
+
+    Ok(())
+}
+
+impl Output {
+    /// Create a conda package from any new files in the host prefix. Note: the
+    /// previous stages should have been completed before calling this
+    /// function.
+    pub async fn create_package(
+        &self,
+        tool_configuration: &tool_configuration::Configuration,
+    ) -> Result<(PathBuf, PathsJson), PackagingError> {
+        let span = tracing::info_span!("Packaging new files");
+        let _enter = span.enter();
+        let files_after = Files::from_prefix(
+            &self.build_configuration.directories.host_prefix,
+            self.recipe.build().always_include_files(),
+            self.recipe.build().files(),
+        )?;
+
+        package_conda(self, tool_configuration, &files_after)
+    }
+}
+
+#[cfg(test)]
+mod packaging_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[cfg(unix)]
+    use std::ffi::OsStr;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(windows)]
+    use std::os::windows::ffi::OsStringExt;
+
+    #[test]
+    fn test_find_case_insensitive_collisions_detects() {
+        let files = vec![
+            Path::new("foo/BAR"),
+            Path::new("foo/bar"),
+            Path::new("foo/Baz"),
+            Path::new("foo/qux"),
+        ];
+        let groups = find_case_insensitive_collisions(&files);
+        assert_eq!(groups.len(), 1);
+
+        let paths_in_group: Vec<String> =
+            groups[0].iter().map(|p| p.display().to_string()).collect();
+
+        assert!(paths_in_group.contains(&"foo/BAR".to_string()));
+        assert!(paths_in_group.contains(&"foo/bar".to_string()));
+    }
+
+    #[test]
+    fn test_find_case_insensitive_collisions_empty() {
+        let files = vec![Path::new("foo/bar"), Path::new("foo/baz")];
+        let groups = find_case_insensitive_collisions(&files);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_find_case_insensitive_collisions_unicode() {
+        let files = vec![
+            Path::new("foo/straße"),
+            Path::new("foo/STRASSE"),
+            Path::new("foo/other"),
+        ];
+        let groups = find_case_insensitive_collisions(&files);
+        assert_eq!(groups.len(), 1);
+    }
+
+    #[test]
+    fn test_slash_collision() {
+        let files = vec![
+            Path::new("path/to/text/file.py"),
+            Path::new("path/to/textfile.py"),
+        ];
+        let groups = find_case_insensitive_collisions(&files);
+        assert_eq!(groups.len(), 0);
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_basic() {
+        let path = Path::new("foo/bar/baz.txt");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        assert_eq!(normalized, "foo/bar/baz.txt");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_lowercase() {
+        let path = Path::new("Foo/BAR/Baz.TXT");
+        let normalized = normalize_path_for_comparison(path, true).unwrap();
+        assert_eq!(normalized, "foo/bar/baz.txt");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_unicode() {
+        let path = Path::new("straße/café");
+        let normalized_case_sensitive = normalize_path_for_comparison(path, false).unwrap();
+        let normalized_case_insensitive = normalize_path_for_comparison(path, true).unwrap();
+
+        assert_eq!(normalized_case_sensitive, "straße/café");
+        assert_eq!(normalized_case_insensitive, "strasse/café");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_unicode_equivalence() {
+        // Test that different Unicode representations normalize to the same result
+        let path1 = Path::new("café"); // é as single character
+        let path2 = Path::new("cafe\u{0301}"); // e + combining acute accent
+
+        let norm1 = normalize_path_for_comparison(path1, false).unwrap();
+        let norm2 = normalize_path_for_comparison(path2, false).unwrap();
+
+        assert_eq!(norm1, norm2);
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_empty_path() {
+        let path = Path::new("");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        assert_eq!(normalized, "");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_single_component() {
+        let path = Path::new("file.txt");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        assert_eq!(normalized, "file.txt");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_current_dir() {
+        let path = Path::new("./foo/bar");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        // Current directory components should be skipped
+        assert_eq!(normalized, "foo/bar");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_parent_dir() {
+        let path = Path::new("../foo/bar");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        assert_eq!(normalized, "../foo/bar");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_absolute_path() {
+        let path = Path::new("/foo/bar/baz");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        assert_eq!(normalized, "/foo/bar/baz");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_with_separators() {
+        let path = Path::new("foo//bar///baz");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        // Multiple separators should be normalized to single separators
+        assert_eq!(normalized, "foo/bar/baz");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_trailing_separator() {
+        let path = Path::new("foo/bar/");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        assert_eq!(normalized, "foo/bar");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_case_folding_special_chars() {
+        // Test German ß -> SS conversion in case folding
+        let path = Path::new("straße");
+        let normalized = normalize_path_for_comparison(path, true).unwrap();
+        assert_eq!(normalized, "strasse");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_complex_path() {
+        let path = Path::new("./Foo/../Bar/./Baz.TXT");
+        let normalized_case_sensitive = normalize_path_for_comparison(path, false).unwrap();
+        let normalized_case_insensitive = normalize_path_for_comparison(path, true).unwrap();
+
+        // Current dir components (.) are skipped, but parent dir (..) and other components are preserved
+        assert_eq!(normalized_case_sensitive, "Foo/../Bar/Baz.TXT");
+        assert_eq!(normalized_case_insensitive, "foo/../bar/baz.txt");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_normalize_path_for_comparison_windows_prefix() {
+        let path = Path::new("C:\\foo\\bar");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        // On Windows, backslashes should be normalized to forward slashes
+        assert_eq!(normalized, "C:/foo/bar");
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_preserves_path_structure() {
+        // Ensure that the original failing test case works correctly
+        let path1 = Path::new("path/to/text/file.py");
+        let path2 = Path::new("path/to/textfile.py");
+
+        let norm1 = normalize_path_for_comparison(path1, true).unwrap();
+        let norm2 = normalize_path_for_comparison(path2, true).unwrap();
+
+        assert_ne!(norm1, norm2);
+        assert_eq!(norm1, "path/to/text/file.py");
+        assert_eq!(norm2, "path/to/textfile.py");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_normalize_path_for_comparison_invalid_unicode_windows() {
+        // Invalid UTF-16 sequence
+        let invalid_utf16: &[u16] = &[0x0043, 0x003A, 0xD800, 0x005C];
+        let os_string = std::ffi::OsString::from_wide(invalid_utf16);
+        let path = Path::new(&os_string);
+
+        let result = normalize_path_for_comparison(path, false);
+        assert!(matches!(
+            result,
+            Err(PathNormalizationError::InvalidUnicode(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_normalize_path_for_comparison_invalid_unicode_unix() {
+        // Invalid UTF-8 sequence
+        let invalid_utf8: &[u8] = &[0x66, 0x6f, 0x80, 0x6f];
+        let path = Path::new(OsStr::from_bytes(invalid_utf8));
+
+        let result = normalize_path_for_comparison(path, false);
+        assert!(matches!(
+            result,
+            Err(PathNormalizationError::InvalidUnicode(_))
+        ));
+    }
+
+    #[test]
+    fn test_normalize_path_for_comparison_turkish_i() {
+        // Test Turkish 'İ' (I with dot) case folding
+        let path = Path::new("İstanbul");
+        let normalized = normalize_path_for_comparison(path, true).unwrap();
+        // Note: According to Unicode case-folding rules, `İ` (U+0130) maps to
+        // `i` followed by COMBINING DOT ABOVE (U+0307). Therefore the
+        // normalized representation contains this combining mark.
+        assert_eq!(normalized, "i\u{0307}stanbul");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_normalize_path_for_comparison_mixed_separators() {
+        let path = Path::new(r"foo/bar\baz");
+        let normalized = normalize_path_for_comparison(path, false).unwrap();
+        assert_eq!(normalized, "foo/bar/baz");
+    }
 }

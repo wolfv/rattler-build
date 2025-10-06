@@ -1,3 +1,15 @@
 book
 output/
 target/
+.idea/
+__pycache__/
+.pytest_cache/
+
+# mkdocs
+.cache
+site
+
+# pixi environments
+.pixi
+target-pixi
+*.conda

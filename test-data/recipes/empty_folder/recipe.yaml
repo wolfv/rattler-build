@@ -1,0 +1,11 @@
+package:
+  name: empty_folder
+  version: "0.24.6"
+
+build:
+  script:
+    - if: win
+      then:
+        - mkdir %PREFIX%\empty_folder
+      else:
+        - mkdir -p $PREFIX/empty_folder

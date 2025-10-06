@@ -1,253 +1,257 @@
-//! The build module contains the code for running the build process for a given [`Output`]
+//! The build module contains the code for running the build process for a given
+//! [`Output`]
+use std::{path::PathBuf, vec};
 
-use std::collections::HashSet;
-use std::ffi::OsString;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use miette::{Context, IntoDiagnostic};
+use rattler_conda_types::{Channel, MatchSpec, Platform, package::PathsJson};
 
-use std::fs;
-use std::process::{Command, Stdio};
-use std::{io::Read, path::PathBuf};
+use crate::{
+    apply_patch_custom,
+    metadata::{Output, build_reindexed_channels},
+    recipe::parser::TestType,
+    render::resolved_dependencies::RunExportsDownload,
+    render::solver::load_repodatas,
+    script::InterpreterError,
+    tool_configuration,
+};
 
-use itertools::Itertools;
-use rattler_shell::shell;
-
-use crate::env_vars::write_env_script;
-use crate::metadata::{Directories, Output};
-use crate::packaging::{package_conda, record_files};
-use crate::render::resolved_dependencies::resolve_dependencies;
-use crate::source::fetch_sources;
-use crate::test::TestConfiguration;
-use crate::{index, test};
-
-/// Create a conda build script and return the path to it
-pub fn get_conda_build_script(
-    output: &Output,
-    directories: &Directories,
-) -> Result<PathBuf, std::io::Error> {
-    let recipe = &output.recipe;
-
-    let default_script = if output.build_configuration.target_platform.is_windows() {
-        "build.bat"
-    } else {
-        "build.sh"
-    };
-
-    let script = recipe
-        .build
-        .script
-        .clone()
-        .unwrap_or_else(|| vec![default_script.into()])
-        .iter()
-        .join("\n");
-
-    let script = if script.ends_with(".sh") || script.ends_with(".bat") {
-        let recipe_file = directories.recipe_dir.join(script);
-        tracing::info!("Reading recipe file: {:?}", recipe_file);
-
-        let mut orig_build_file = File::open(recipe_file)?;
-        let mut orig_build_file_text = String::new();
-        orig_build_file.read_to_string(&mut orig_build_file_text)?;
-        orig_build_file_text
-    } else {
-        script
-    };
-
-    if cfg!(unix) {
-        let build_env_script_path = directories.work_dir.join("build_env.sh");
-        let preambel = format!(
-            "if [ -z ${{CONDA_BUILD+x}} ]; then\n    source {}\nfi",
-            build_env_script_path.to_string_lossy()
-        );
-        let mut fout = File::create(&build_env_script_path)?;
-        write_env_script(output, "BUILD", &mut fout, shell::Bash).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to write build env script: {}", e),
-            )
-        })?;
-        let full_script = format!("{}\n{}", preambel, script);
-        let build_script_path = directories.work_dir.join("conda_build.sh");
-
-        let mut build_script_file = File::create(&build_script_path)?;
-        build_script_file.write_all(full_script.as_bytes())?;
-        Ok(build_script_path)
-    } else {
-        let build_env_script_path = directories.work_dir.join("build_env.bat");
-        let preambel = format!(
-            "IF \"%CONDA_BUILD%\" == \"\" (\n    call {}\n)",
-            build_env_script_path.to_string_lossy()
-        );
-        let mut fout = File::create(&build_env_script_path)?;
-
-        write_env_script(output, "BUILD", &mut fout, shell::CmdExe).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to write build env script: {}", e),
-            )
-        })?;
-
-        let full_script = format!("{}\n{}", preambel, script);
-        let build_script_path = directories.work_dir.join("conda_build.bat");
-
-        let mut build_script_file = File::create(&build_script_path)?;
-        build_script_file.write_all(full_script.as_bytes())?;
-        Ok(build_script_path)
-    }
+/// Behavior for handling the working directory during the build process
+#[derive(Debug, Clone, Copy)]
+pub enum WorkingDirectoryBehavior {
+    /// Preserve the working directory (don't clean up)
+    Preserve,
+    /// Clean up the working directory after build
+    Cleanup,
 }
 
-/// Spawns a process and replaces the given strings in the output with the given replacements.
-/// This is used to replace the host prefix with $PREFIX and the build prefix with $BUILD_PREFIX
-fn run_process_with_replacements(
-    command: &str,
-    cwd: &PathBuf,
-    args: &[OsString],
-    replacements: &[(&str, &str)],
-) -> anyhow::Result<()> {
-    let mut child = Command::new(command)
-        .current_dir(cwd)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("Failed to execute command");
+/// Check if the build should be skipped because it already exists in any of the
+/// channels
+pub async fn skip_existing(
+    mut outputs: Vec<Output>,
+    tool_configuration: &tool_configuration::Configuration,
+) -> miette::Result<Vec<Output>> {
+    let span = tracing::info_span!("Checking existing builds");
+    let _enter = span.enter();
 
-    if let Some(ref mut stdout) = child.stdout {
-        let reader = BufReader::new(stdout);
+    let only_local = match tool_configuration.skip_existing {
+        tool_configuration::SkipExisting::Local => true,
+        tool_configuration::SkipExisting::All => false,
+        tool_configuration::SkipExisting::None => return Ok(outputs),
+    };
 
-        // Process the output line by line
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                let filtered_line = replacements
-                    .iter()
-                    .fold(line, |acc, (from, to)| acc.replace(from, to));
-                println!("{}", filtered_line);
-            } else {
-                eprintln!("Error reading output: {:?}", line);
-            }
+    // If we should skip existing builds, check if the build already exists
+    let Some(first_output) = outputs.first() else {
+        return Ok(outputs);
+    };
+
+    let all_channels =
+        build_reindexed_channels(&first_output.build_configuration, tool_configuration)
+            .await
+            .into_diagnostic()
+            .context("failed to reindex output channel")?;
+
+    let match_specs = outputs
+        .iter()
+        .map(|o| o.name().clone().into())
+        .collect::<Vec<MatchSpec>>();
+
+    let channels = if only_local {
+        vec![
+            Channel::from_directory(&first_output.build_configuration.directories.output_dir)
+                .base_url,
+        ]
+    } else {
+        all_channels
+    };
+
+    let existing = load_repodatas(
+        &channels,
+        first_output.host_platform().platform,
+        &match_specs,
+        tool_configuration,
+    )
+    .await
+    .map_err(|e| miette::miette!("Failed to load repodata: {e}."))?;
+
+    let existing_set = existing
+        .iter()
+        .flatten()
+        .map(|p| {
+            format!(
+                "{}-{}-{}",
+                p.package_record.name.as_normalized(),
+                p.package_record.version,
+                p.package_record.build
+            )
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    // Retain only the outputs that do not exist yet
+    outputs.retain(|output| {
+        let exists = existing_set.contains(&format!(
+            "{}-{}-{}",
+            output.name().as_normalized(),
+            output.version(),
+            &output.build_string()
+        ));
+        if exists {
+            // The identifier should always be set at this point
+            tracing::info!("Skipping build for {}", output.identifier());
+        }
+        !exists
+    });
+
+    Ok(outputs)
+}
+
+/// Run the build for the given output. This will fetch the sources, resolve the
+/// dependencies, and execute the build script. Returns the path to the
+/// resulting package.
+pub async fn run_build(
+    output: Output,
+    tool_configuration: &tool_configuration::Configuration,
+    working_directory_behavior: WorkingDirectoryBehavior,
+) -> miette::Result<(Output, PathBuf)> {
+    let cleanup = matches!(
+        working_directory_behavior,
+        WorkingDirectoryBehavior::Cleanup
+    );
+    output
+        .build_configuration
+        .directories
+        .create_build_dir(cleanup)
+        .into_diagnostic()?;
+
+    let span = tracing::info_span!("Running build for", recipe = output.identifier());
+    let _enter = span.enter();
+    output.record_build_start();
+
+    let directories = output.build_configuration.directories.clone();
+
+    let output = if output.recipe.cache.is_some() {
+        output.build_or_fetch_cache(tool_configuration).await?
+    } else {
+        output
+            .fetch_sources(tool_configuration, apply_patch_custom)
+            .await
+            .into_diagnostic()?
+    };
+
+    let output = output
+        .resolve_dependencies(tool_configuration, RunExportsDownload::DownloadMissing)
+        .await
+        .into_diagnostic()?;
+
+    output
+        .install_environments(tool_configuration)
+        .await
+        .into_diagnostic()?;
+
+    match output.run_build_script().await {
+        Ok(_) => {}
+        Err(InterpreterError::Debug(info)) => {
+            tracing::info!("{}", info);
+            return Err(miette::miette!(
+                "Script not executed because debug mode is enabled"
+            ));
+        }
+        Err(InterpreterError::ExecutionFailed(_)) => {
+            return Err(miette::miette!("Script failed to execute"));
         }
     }
 
-    let status = child.wait().expect("Failed to wait on child");
+    // Package all the new files
+    let (result, paths_json) = output
+        .create_package(tool_configuration)
+        .await
+        .into_diagnostic()?;
 
-    if !status.success() {
-        return Err(anyhow::anyhow!("Build failed"));
+    // Check for binary prefix if configured
+    if tool_configuration.error_prefix_in_binary {
+        tracing::info!("Checking for embedded prefix in binary files...");
+        check_for_binary_prefix(&output, &paths_json)?;
+    }
+
+    // Check for symlinks on Windows if not allowed
+    if (output.build_configuration.target_platform.is_windows()
+        || output.build_configuration.target_platform == Platform::NoArch)
+        && !tool_configuration.allow_symlinks_on_windows
+    {
+        tracing::info!("Checking for symlinks ...");
+        check_for_symlinks_on_windows(&output, &paths_json)?;
+    }
+
+    output.record_artifact(&result, &paths_json);
+
+    let span = tracing::info_span!("Running package tests");
+    let enter = span.enter();
+
+    // We run all the package content tests
+    for test in output.recipe.tests() {
+        if let TestType::PackageContents { package_contents } = test {
+            package_contents
+                .run_test(&paths_json, &output)
+                .into_diagnostic()?;
+        }
+    }
+
+    if !tool_configuration.no_clean {
+        directories.clean().into_diagnostic()?;
+    }
+
+    drop(enter);
+
+    if !tool_configuration.no_clean {
+        directories.clean().into_diagnostic()?;
+    }
+
+    Ok((output, result))
+}
+
+/// Check if any binary files contain the host prefix
+fn check_for_binary_prefix(output: &Output, paths_json: &PathsJson) -> Result<(), miette::Error> {
+    use rattler_conda_types::package::FileMode;
+
+    for paths_entry in &paths_json.paths {
+        if let Some(prefix_placeholder) = &paths_entry.prefix_placeholder {
+            if prefix_placeholder.file_mode == FileMode::Binary {
+                return Err(miette::miette!(
+                    "Package {} contains Binary file {} which contains host prefix placeholder, which may cause issues when the package is installed to a different location. \
+                    Consider fixing the build process to avoid embedding the host prefix in binaries. \
+                    To allow this, remove the --error-prefix-in-binary flag.",
+                    output.name().as_normalized(),
+                    paths_entry.relative_path.display()
+                ));
+            }
+        }
     }
 
     Ok(())
 }
 
-/// Run the build for the given output. This will fetch the sources, resolve the dependencies,
-/// and execute the build script. Returns the path to the resulting package.
-pub async fn run_build(output: &Output) -> anyhow::Result<PathBuf> {
-    let directories = &output.build_configuration.directories;
+/// Check if any files are symlinks on Windows
+fn check_for_symlinks_on_windows(
+    output: &Output,
+    paths_json: &PathsJson,
+) -> Result<(), miette::Error> {
+    use rattler_conda_types::package::PathType;
 
-    index::index(
-        &directories.output_dir,
-        Some(&output.build_configuration.target_platform),
-    )?;
+    let mut symlinks = Vec::new();
 
-    // Add the local channel to the list of channels
-    let mut channels = vec![directories.output_dir.to_string_lossy().to_string()];
-    channels.extend(output.build_configuration.channels.clone());
-
-    if let Some(source) = &output.recipe.source {
-        fetch_sources(
-            source,
-            &directories.work_dir,
-            &directories.recipe_dir,
-            &directories.output_dir,
-        )
-        .await?;
+    for paths_entry in &paths_json.paths {
+        if paths_entry.path_type == PathType::SoftLink {
+            symlinks.push(paths_entry.relative_path.display().to_string());
+        }
     }
 
-    let finalized_dependencies = resolve_dependencies(output, &channels).await?;
-
-    // The output with the resolved dependencies
-    let output = Output {
-        finalized_dependencies: Some(finalized_dependencies),
-        recipe: output.recipe.clone(),
-        build_configuration: output.build_configuration.clone(),
-    };
-
-    let build_script = get_conda_build_script(&output, directories)?;
-    tracing::info!("Work dir: {:?}", &directories.work_dir);
-    tracing::info!("Build script: {:?}", build_script);
-
-    let files_before = record_files(&directories.host_prefix).expect("Could not record files");
-
-    let (interpreter, args) = if cfg!(unix) {
-        ("/bin/bash", vec![build_script.as_os_str().to_owned()])
-    } else {
-        (
-            "cmd.exe",
-            vec![
-                OsString::from("/d"),
-                OsString::from("/c"),
-                build_script.as_os_str().to_owned(),
-            ],
-        )
-    };
-    run_process_with_replacements(
-        interpreter,
-        &directories.work_dir,
-        &args,
-        &[
-            (
-                directories.host_prefix.to_string_lossy().as_ref(),
-                "$PREFIX",
-            ),
-            (
-                directories.build_prefix.to_string_lossy().as_ref(),
-                "$BUILD_PREFIX",
-            ),
-        ],
-    )?;
-
-    let files_after = record_files(&directories.host_prefix).expect("Could not record files");
-
-    let difference = files_after
-        .difference(&files_before)
-        .cloned()
-        .collect::<HashSet<_>>();
-
-    let result = package_conda(
-        &output,
-        &difference,
-        &directories.host_prefix,
-        &directories.output_dir,
-    )?;
-
-    if !output.build_configuration.no_clean {
-        fs::remove_dir_all(&directories.build_dir)?;
+    if !symlinks.is_empty() {
+        return Err(miette::miette!(
+            "Package {} contains symlinks which are not supported on most Windows systems:\n  - {}\n\
+            To allow symlinks, use the --allow-symlinks-on-windows flag.",
+            output.name().as_normalized(),
+            symlinks.join("\n  - ")
+        ));
     }
 
-    index::index(
-        &directories.output_dir,
-        Some(&output.build_configuration.target_platform),
-    )?;
-
-    let test_dir = directories.work_dir.join("test");
-    fs::create_dir_all(&test_dir)?;
-
-    println!("{}", output);
-
-    tracing::info!("Running tests");
-
-    test::run_test(
-        &result,
-        &TestConfiguration {
-            test_prefix: test_dir.clone(),
-            target_platform: Some(output.build_configuration.target_platform),
-            keep_test_prefix: output.build_configuration.no_clean,
-            channels,
-        },
-    )
-    .await?;
-
-    if !output.build_configuration.no_clean {
-        fs::remove_dir_all(&directories.build_dir)?;
-    }
-
-    Ok(result)
+    Ok(())
 }

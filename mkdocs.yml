@@ -1,0 +1,169 @@
+# yaml-language-server: $schema=https://squidfunk.github.io/mkdocs-material/schema.json
+
+site_name: "rattler-build"
+site_url: https://prefix-dev.github.io/rattler-build/
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  favicon: assets/favicon.png
+  logo: assets/powerdrill.png
+  font:
+    text: Red Hat Text
+    code: JetBrains Mono
+
+  palette:
+    # Palette toggle for automatic mode
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: prefix-light
+      accent: prefix-light
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: prefix
+      accent: prefix
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+
+  icon:
+    edit: material/pencil
+    view: material/eye
+
+  features:
+    - content.tabs.link
+    - content.code.copy
+    - content.action.edit
+    - content.code.annotate
+    # - content.code.select Sponsor only
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+
+extra_css:
+  - stylesheets/extra.css
+
+repo_url: https://github.com/prefix-dev/rattler-build/
+edit_uri: edit/main/docs/
+
+markdown_extensions:
+  - admonition
+  - def_list
+  - footnotes
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      toc_depth: 3
+      permalink: "#"
+
+extra:
+  homepage: https://prefix.dev
+  social:
+    - icon: fontawesome/brands/twitter
+      link: https://twitter.com/prefix_dev
+    - icon: fontawesome/brands/linkedin
+      link: https://www.linkedin.com/company/prefix-dev
+    - icon: fontawesome/brands/github
+      link: https://github.com/prefix-dev
+  version:
+    provider: mike
+
+nav:
+  - Home: index.md
+  - High-level overview: highlevel.md
+  # - Tutorials:
+  #     - Writing a recipe: tutorials/writing_recipe.md
+  - Examples:
+      - "Python": tutorials/python.md
+      - "C++": tutorials/cpp.md
+      - "Javascript": tutorials/javascript.md
+      - "Rust": tutorials/rust.md
+      - "Go": tutorials/go.md
+      - "Perl": tutorials/perl.md
+      - "R": tutorials/r.md
+      - "Repackaging": tutorials/repackaging.md
+      - "Converting from conda-build": converting_from_conda_build.md
+
+  - Build options:
+      - Advanced options: build_options.md
+
+      - Selector syntax (if/then): selectors.md
+      - Build script: build_script.md
+      - Variants: variants.md
+      - Configuration: config.md
+
+      - Compilers and cross compilation: compilers.md
+
+      - Experimental features: experimental_features.md
+      - Multiple output cache: multiple_output_cache.md
+      - Sandbox: sandbox.md
+      - Generating recipes: recipe_generation.md
+      - Creating patches: create_patch.md
+      - Tips and tricks: tips_and_tricks.md
+
+  - Testing:
+      - Testing packages: testing.md
+      - Reproducible builds: rebuild.md
+
+  - User Experience:
+      - Terminal User Interface (TUI): tui.md
+      - Authentication & upload: authentication_and_upload.md
+      - Automatic recipe linting: automatic_linting.md
+
+  - Package:
+      - Package specification: package_spec.md
+      - Package scripts: special_files.md
+      - Package Internals: internals.md
+      - System integration: system_integration.md
+
+  - References:
+      - Recipe file: reference/recipe_file.md
+      - CLI: reference/cli.md
+      - Jinja: reference/jinja.md
+      - Python Bindings: reference/python_bindings.md
+
+plugins:
+  - search
+  - social
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - py-rattler-build
+          options:
+            separate_signature: true
+            show_source: false
+  - mike:
+# These fields are all optional; the defaults are as below...
+# alias_type: symlink
+# redirect_template: null
+# deploy_prefix: ''
+# canonical_version: null
+# version_selector: true
+# css_dir: css
+# javascript_dir: js

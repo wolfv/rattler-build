@@ -4,18 +4,25 @@ on:
   push:
     branches:
       - main
-
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
-  RUSTDOCFLAGS: --html-in-header header.html
-
-
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+    tags:
+      - v**
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+      - "mkdocs.yml"
+      - "pixi.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to deploy"
+        required: true
+        default: "v0.0.0"
 
 # Allow one concurrent deployment
 concurrency:
@@ -23,63 +30,116 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
-    if: github.repository == 'prefix-dev/rattler-build'
+  # Generate CLI docs by building the `generate-cli-docs` binary and committing the result to the PR.
+  generate-cli-docs:
+    if: github.event_name == 'pull_request' && github.repository == 'prefix-dev/rattler-build'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - uses: prefix-dev/setup-pixi@v0.9.1
+
+      - name: Build docs for PR
+        run: |
+          pixi run generate-cli-docs
+
+      - name: Check for changes
+        id: git_diff
+        run: |
+          git diff --exit-code || echo "has_changes=true" >> $GITHUB_ENV
+
+      - name: Output instructions if there are changes
+        if: env.has_changes == 'true'
+        run: |
+          echo "There are changes in the CLI docs."
+          echo "Please run the following commands to commit and push the changes:"
+          echo ""
+          echo "pixi run generate-cli-docs"
+          echo "git commit -am 'docs: update CLI docs'"
+          echo "git push"
+          echo ""
+          exit 1
+
+      - name: Output message if there are no changes
+        if: env.has_changes != 'true'
+        run: echo "No changes detected."
+
+  build-docs:
+    needs: generate-cli-docs
+    if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v4
         with:
           submodules: recursive
 
-      - name: Setup mdBook
-        uses: peaceiris/actions-mdbook@v1
-        with:
-          mdbook-version: 'latest'
+      - uses: prefix-dev/setup-pixi@v0.9.1
 
-
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.68.0
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v3
-
-      #  This does the following:
-      #   - Replaces the docs icon with one that clearly denotes it's not the released package on crates.io
-      #   - Adds a meta tag that forces Google not to index any page on the site.
-      - name: Pre-docs-build
+      - name: Build docs for test
         run: |
-          echo "<meta name=\"robots\" content=\"noindex\">" > header.html
+          pixi run build-docs
 
-      - uses: Swatinem/rust-cache@v2
-      - name: Build Documentation
-        run: cargo doc --workspace --no-deps --all-features
-      - name: Build Book
-        run: mdbook build
-
-      #  This adds the following:
-      #   - A top level redirect to the bevy crate documentation
-      #   - A robots.txt file to forbid any crawling of the site (to defer to the docs.rs site on search engines).
-      #   - A .nojekyll file to disable Jekyll GitHub Pages builds.
-      - name: Finalize documentation
-        run: |
-          mkdir final_docs
-          touch final_docs/.nojekyll
-          echo "<meta http-equiv=\"refresh\" content=\"0; url=rattler/index.html\">" > target/doc/index.html
-
-          mkdir -p final_docs/reference
-          mv target/doc/* final_docs/reference
-
-          mv book/* final_docs/
-
-          echo "User-Agent: *\nDisallow: /" > final_docs/robots.txt
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v1
+  docs-release:
+    # Don't run on forks
+    if: github.repository == 'prefix-dev/rattler-build' && (startsWith(github.event.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v4
         with:
-          path: 'final_docs'
+          # fetch everything so we can checkout the tag
+          fetch-depth: 0
+          submodules: recursive
 
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v2
+      # check out tag if workflow_dispatch
+      - name: Checkout tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git checkout tags/${{ github.event.inputs.tag }}
+
+      - uses: prefix-dev/setup-pixi@v0.9.1
+
+      - name: Configure Git user
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+      - name: Extract tag name
+        if: github.event_name != 'workflow_dispatch'
+        run: echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+
+      - name: Tag from workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "RELEASE_VERSION=${{ github.event.inputs.tag }}" >> $GITHUB_ENV
+
+      - name: Deploy with mike 🚀
+        run: |
+          pixi run deploy-latest
+
+  docs-dev:
+    # Don't run on forks
+    if: github.repository == 'prefix-dev/rattler-build' && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && !startsWith(github.event.inputs.tag, 'v'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v4
+        with:
+          # fetch everything so we can checkout the tag
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: prefix-dev/setup-pixi@v0.9.1
+
+      - name: Configure Git user
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+      - name: Deploy with mike 🚀
+        run: |
+          pixi run deploy-dev

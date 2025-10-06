@@ -1,0 +1,39 @@
+context:
+  version: "0.1.0"
+
+package:
+  name: zlink
+  version: ${{ version }}
+
+source:
+  path: ./zlink
+
+build:
+  script:
+    - if: win
+      then:
+        - cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release %CMAKE_ARGS%
+    - if: unix
+      then:
+        - cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS}
+    - cmake --build build --config Release
+    - cmake --install build
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ninja
+    - cmake
+  host:
+    - zlib
+
+tests:
+  - script:
+      - if: linux
+        then:
+          - zlink
+          - ldd $PREFIX/bin/zlink
+      - if: osx
+        then:
+          - zlink
+          - otool -L $PREFIX/bin/zlink

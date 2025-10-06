@@ -1,0 +1,21 @@
+context:
+  name: globtest
+  version: "0.24.6"
+
+package:
+  name: "${{ name|lower }}"
+  version: "${{ version }}"
+
+source:
+  url: https://github.com/xtensor-stack/xtensor/archive/${{ version }}.zip
+  sha256: 8cd062cfefce0f5bff8961e0c42b3636d5e7eddbe33e5c3167e3fb6d8380f50e
+
+about:
+  homepage: https://github.com/xtensor-stack/xtensor
+  license: BSD-3-Clause
+  license_file:
+    - LICENSE
+    - cmake/
+    - docs/*.yml
+    # this should include the entire `tools` directory
+    - tools
