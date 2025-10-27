@@ -190,6 +190,21 @@ pub enum TestType {
     },
 }
 
+impl TestType {
+    /// Returns the type name of this test as a string
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Python { .. } => "Python",
+            Self::Perl { .. } => "Perl",
+            Self::R { .. } => "R",
+            Self::Ruby { .. } => "Ruby",
+            Self::Command(_) => "Command",
+            Self::Downstream(_) => "Downstream",
+            Self::PackageContents { .. } => "PackageContents",
+        }
+    }
+}
+
 /// Package content test that compares the contents of the package with the expected contents.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PackageContentsTest {

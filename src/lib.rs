@@ -1065,15 +1065,24 @@ pub async fn build_recipes(
     Ok(())
 }
 
+/// Calculate the package test index by excluding PackageContents tests
+fn calculate_package_test_index(
+    tests: &[crate::recipe::parser::TestType],
+    current_test_index: usize,
+) -> usize {
+    tests[..=current_test_index]
+        .iter()
+        .filter(|t| !matches!(t, crate::recipe::parser::TestType::PackageContents { .. }))
+        .count()
+        .saturating_sub(1)
+}
+
 /// Debug a recipe by setting up the environment without running the build script
 pub async fn debug_recipe(
     debug_data: DebugData,
     log_handler: &Option<LoggingOutputHandler>,
 ) -> miette::Result<()> {
     let recipe_path = get_recipe_path(&debug_data.recipe_path)?;
-
-    let is_test_mode = debug_data.test_mode;
-    let test_index = debug_data.test_index; // None means run all tests, Some(n) means run test n
 
     let build_data = BuildData {
         build_platform: debug_data.build_platform,
@@ -1180,7 +1189,7 @@ pub async fn debug_recipe(
             }
         }
 
-        if is_test_mode {
+        if debug_data.run_tests {
             // Test mode: setup test environment and run test(s)
             let tests = &output.recipe.tests;
 
@@ -1189,13 +1198,14 @@ pub async fn debug_recipe(
             }
 
             // Determine which tests to run
-            let tests_to_run: Vec<usize> = match test_index {
+            let tests_to_run: Vec<usize> = match debug_data.test_index {
                 Some(idx) => {
                     if idx >= tests.len() {
                         return Err(miette::miette!(
-                            "Test index {} out of range. Recipe has {} test(s).",
+                            "Test index {} is out of range. Recipe has {} test(s) (valid indices: 0-{}).",
                             idx,
-                            tests.len()
+                            tests.len(),
+                            tests.len().saturating_sub(1)
                         ));
                     }
                     vec![idx]
@@ -1204,32 +1214,26 @@ pub async fn debug_recipe(
             };
 
             tracing::info!("\n=== Test Debug Mode ===");
-            if test_index.is_some() {
-                tracing::info!("Running test {} of {}", tests_to_run[0], tests.len());
-            } else {
-                tracing::info!("Running all {} tests", tests.len());
+            match debug_data.test_index {
+                Some(idx) => {
+                    tracing::info!("Running test {} of {}", idx, tests.len());
+                }
+                None => {
+                    tracing::info!("Running all {} tests", tests.len());
+                }
             }
+
             tracing::info!("Available tests:");
             for (idx, test) in tests.iter().enumerate() {
-                let test_type = match test {
-                    crate::recipe::parser::TestType::Python { .. } => "Python",
-                    crate::recipe::parser::TestType::Perl { .. } => "Perl",
-                    crate::recipe::parser::TestType::R { .. } => "R",
-                    crate::recipe::parser::TestType::Ruby { .. } => "Ruby",
-                    crate::recipe::parser::TestType::Command(_) => "Command",
-                    crate::recipe::parser::TestType::Downstream(_) => "Downstream",
-                    crate::recipe::parser::TestType::PackageContents { .. } => "PackageContents",
-                };
                 let marker = if tests_to_run.contains(&idx) {
                     ">>>"
                 } else {
                     "   "
                 };
-                tracing::info!("{} Test {}: {}", marker, idx, test_type);
+                tracing::info!("{} Test {}: {}", marker, idx, test.type_name());
             }
 
-            // Build the package first to be able to run tests
-            tracing::info!("\nNote: Tests require a built package. Building package first...");
+            tracing::info!("\nBuilding package (required for running tests)...");
 
             // Create a modified output with debug mode disabled for the actual build
             let mut build_output = output.clone();
@@ -1260,14 +1264,7 @@ pub async fn debug_recipe(
                     continue;
                 }
 
-                // Calculate the package test index (excluding PackageContents tests before this one)
-                let package_test_index = tests[..=current_test_index]
-                    .iter()
-                    .filter(|t| {
-                        !matches!(t, crate::recipe::parser::TestType::PackageContents { .. })
-                    })
-                    .count()
-                    - 1;
+                let package_test_index = calculate_package_test_index(tests, current_test_index);
 
                 let test_config = TestConfiguration {
                     test_prefix: config
