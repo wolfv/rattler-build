@@ -4,13 +4,16 @@ use marked_yaml::Node as MarkedNode;
 use rattler_build_jinja::JinjaTemplate;
 use rattler_build_yaml_parser::{ParseMapping, helpers::contains_jinja_template, parse_value};
 
+use rattler_build_yaml_parser::parse_conditional_list;
+
 use crate::{
     error::{ParseError, ParseResult},
     stage0::{
         ConditionalList, Requirements, Value,
         output::{
             CacheInherit, Inherit, MultiOutputRecipe, Output, PackageOutput, RecipeMetadata,
-            StagingBuild, StagingMetadata, StagingOutput,
+            StagingBuild, StagingMetadata, StagingOutput, SubPackage, SubPackageBuild,
+            SubPackageRequirements,
         },
         parser::{
             get_span, parse_about, parse_build, parse_extra, parse_requirements, parse_source,
@@ -480,6 +483,13 @@ fn parse_package_output(
         ConditionalList::default()
     };
 
+    // Parse optional sub_packages section
+    let sub_packages = if let Some(sub_packages_node) = mapping.get("sub_packages") {
+        parse_sub_packages(&MarkedNode::from(sub_packages_node.clone()))?
+    } else {
+        Vec::new()
+    };
+
     // Validate field names
     let node = MarkedNode::Mapping(mapping.clone());
     node.validate_keys(
@@ -492,6 +502,7 @@ fn parse_package_output(
             "build",
             "about",
             "tests",
+            "sub_packages",
         ],
     )?;
 
@@ -503,6 +514,7 @@ fn parse_package_output(
         build,
         about,
         tests,
+        sub_packages,
     })
 }
 
@@ -586,4 +598,189 @@ fn parse_inherit(yaml: &MarkedNode) -> ParseResult<Inherit> {
         get_span(yaml),
     )
     .with_message("inherit must be null (for top-level), a string (cache name), or a mapping with 'from' and optional 'run_exports'"))
+}
+
+/// Parse sub_packages section (list of subpackage definitions)
+pub fn parse_sub_packages(yaml: &MarkedNode) -> ParseResult<Vec<SubPackage>> {
+    let sequence = yaml.as_sequence().ok_or_else(|| {
+        ParseError::expected_type("sequence", "non-sequence", get_span(yaml))
+            .with_message("sub_packages must be a list")
+    })?;
+
+    let mut sub_packages = Vec::new();
+
+    for item in sequence.iter() {
+        let mapping = item.as_mapping().ok_or_else(|| {
+            ParseError::expected_type("mapping", "non-mapping", get_span(item))
+                .with_message("each sub_package must be a mapping")
+        })?;
+
+        sub_packages.push(parse_sub_package(mapping)?);
+    }
+
+    Ok(sub_packages)
+}
+
+/// Parse a single subpackage definition
+fn parse_sub_package(
+    mapping: &marked_yaml::types::MarkedMappingNode,
+) -> ParseResult<SubPackage> {
+    // Parse package metadata (required)
+    let package_node = mapping.get("package").ok_or_else(|| {
+        ParseError::missing_field("package", get_span(&MarkedNode::Mapping(mapping.clone())))
+    })?;
+    let package = parse_package_metadata(package_node)?;
+
+    // Parse optional build (file selection only)
+    let build = if let Some(build_node) = mapping.get("build") {
+        parse_sub_package_build(build_node)?
+    } else {
+        SubPackageBuild::default()
+    };
+
+    // Parse optional requirements (run-time only)
+    let requirements = if let Some(req_node) = mapping.get("requirements") {
+        parse_sub_package_requirements(req_node)?
+    } else {
+        SubPackageRequirements::default()
+    };
+
+    // Parse optional about
+    let about = if let Some(about_node) = mapping.get("about") {
+        parse_about(about_node)?
+    } else {
+        crate::stage0::About::default()
+    };
+
+    // Parse optional tests
+    let tests = if let Some(tests_node) = mapping.get("tests") {
+        parse_tests(tests_node)?
+    } else {
+        ConditionalList::default()
+    };
+
+    // Validate field names
+    let node = MarkedNode::Mapping(mapping.clone());
+    node.validate_keys(
+        "sub_package",
+        &["package", "build", "requirements", "about", "tests"],
+    )?;
+
+    Ok(SubPackage {
+        package,
+        build,
+        requirements,
+        about,
+        tests,
+    })
+}
+
+/// Parse subpackage build section (only file selection and post-processing allowed)
+fn parse_sub_package_build(yaml: &MarkedNode) -> ParseResult<SubPackageBuild> {
+    let mapping = yaml.as_mapping().ok_or_else(|| {
+        ParseError::expected_type("mapping", "non-mapping", get_span(yaml))
+            .with_message("build must be a mapping")
+    })?;
+
+    let mut build = SubPackageBuild::default();
+
+    for (key_node, value_node) in mapping.iter() {
+        let key = key_node.as_str();
+
+        match key {
+            "files" => {
+                build.files = crate::stage0::parser::build::parse_include_exclude(value_node)?;
+            }
+            "noarch" => {
+                build.noarch = Some(crate::stage0::parser::build::parse_noarch(value_node)?);
+            }
+            "python" => {
+                build.python = crate::stage0::parser::build::parse_python(value_node)?;
+            }
+            "dynamic_linking" => {
+                build.dynamic_linking =
+                    crate::stage0::parser::build::parse_dynamic_linking(value_node)?;
+            }
+            "prefix_detection" => {
+                build.prefix_detection =
+                    crate::stage0::parser::build::parse_prefix_detection(value_node)?;
+            }
+            "post_process" => {
+                build.post_process =
+                    crate::stage0::parser::build::parse_post_process_list(value_node)?;
+            }
+            // Disallow build-time fields
+            "script" | "number" | "string" | "skip" | "always_copy_files"
+            | "always_include_files" | "merge_build_and_host_envs" | "variant" => {
+                return Err(ParseError::invalid_value(
+                    "sub_package build",
+                    format!("'{}' is not allowed in sub_package build section", key),
+                    *key_node.span(),
+                )
+                .with_suggestion(
+                    "sub_packages only support 'files', 'noarch', 'python', 'dynamic_linking', 'prefix_detection', and 'post_process'",
+                ));
+            }
+            _ => {
+                return Err(ParseError::invalid_value(
+                    "sub_package build",
+                    format!("unknown field '{}'", key),
+                    *key_node.span(),
+                ));
+            }
+        }
+    }
+
+    Ok(build)
+}
+
+/// Parse subpackage requirements section (only run-time requirements allowed)
+fn parse_sub_package_requirements(yaml: &MarkedNode) -> ParseResult<SubPackageRequirements> {
+    let mapping = yaml.as_mapping().ok_or_else(|| {
+        ParseError::expected_type("mapping", "non-mapping", get_span(yaml))
+            .with_message("requirements must be a mapping")
+    })?;
+
+    let mut requirements = SubPackageRequirements::default();
+
+    for (key_node, value_node) in mapping.iter() {
+        let key = key_node.as_str();
+
+        match key {
+            "run" => {
+                requirements.run = parse_conditional_list(value_node)?;
+            }
+            "run_constraints" => {
+                requirements.run_constraints = parse_conditional_list(value_node)?;
+            }
+            "run_exports" => {
+                requirements.run_exports =
+                    crate::stage0::parser::requirements::parse_run_exports(value_node)?;
+            }
+            "ignore_run_exports" => {
+                requirements.ignore_run_exports =
+                    crate::stage0::parser::requirements::parse_ignore_run_exports(value_node)?;
+            }
+            // Disallow build-time requirements
+            "build" | "host" => {
+                return Err(ParseError::invalid_value(
+                    "sub_package requirements",
+                    format!("'{}' is not allowed in sub_package requirements", key),
+                    *key_node.span(),
+                )
+                .with_suggestion(
+                    "sub_packages only support 'run', 'run_constraints', 'run_exports', and 'ignore_run_exports'",
+                ));
+            }
+            _ => {
+                return Err(ParseError::invalid_value(
+                    "sub_package requirements",
+                    format!("unknown field '{}'", key),
+                    *key_node.span(),
+                ));
+            }
+        }
+    }
+
+    Ok(requirements)
 }

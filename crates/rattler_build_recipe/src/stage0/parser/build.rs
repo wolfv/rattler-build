@@ -139,7 +139,7 @@ fn parse_bool_or_patterns<T>(
 /// Noarch can be either:
 /// - A scalar string: "python" or "generic"
 /// - A template: "${{ noarch_type }}"
-fn parse_noarch(node: &Node) -> Result<Value<NoArchType>, ParseError> {
+pub fn parse_noarch(node: &Node) -> Result<Value<NoArchType>, ParseError> {
     let scalar = node.as_scalar().ok_or_else(|| {
         ParseError::expected_type("scalar", "non-scalar", get_span(node))
             .with_message("Expected 'noarch' to be a string (\"python\" or \"generic\")")
@@ -344,7 +344,7 @@ pub(crate) fn parse_script(node: &Node) -> Result<crate::stage0::types::Script, 
 }
 
 /// Parse build files field - can be a list or include/exclude mapping
-fn parse_build_files(node: &Node) -> Result<IncludeExclude, ParseError> {
+pub fn parse_include_exclude(node: &Node) -> Result<IncludeExclude, ParseError> {
     // Try parsing as a mapping with include/exclude first
     if let Some(mapping) = node.as_mapping() {
         let mut include = None;
@@ -422,7 +422,7 @@ fn parse_build_from_mapping(mapping: &MarkedMappingNode) -> Result<Build, ParseE
                 build.noarch = Some(parse_noarch(value_node)?);
             }
             "python" => {
-                build.python = parse_python_build(value_node)?;
+                build.python = parse_python(value_node)?;
             }
             "skip" => {
                 // Skip accepts both a single value (e.g., "win") or a list
@@ -439,7 +439,7 @@ fn parse_build_from_mapping(mapping: &MarkedMappingNode) -> Result<Build, ParseE
                     parse_bool_value(value_node, "merge_build_and_host_envs")?;
             }
             "files" => {
-                build.files = parse_build_files(value_node)?;
+                build.files = parse_include_exclude(value_node)?;
             }
             "dynamic_linking" => {
                 build.dynamic_linking = parse_dynamic_linking(value_node)?;
@@ -474,7 +474,7 @@ fn parse_binary_relocation(node: &Node) -> Result<BinaryRelocation, ParseError> 
     )
 }
 
-fn parse_dynamic_linking(node: &Node) -> Result<DynamicLinking, ParseError> {
+pub fn parse_dynamic_linking(node: &Node) -> Result<DynamicLinking, ParseError> {
     let mapping = node.as_mapping().ok_or_else(|| {
         ParseError::expected_type("mapping", "non-mapping", get_span(node))
             .with_message("Expected 'dynamic_linking' to be a mapping")
@@ -522,7 +522,7 @@ fn parse_dynamic_linking(node: &Node) -> Result<DynamicLinking, ParseError> {
     Ok(dynamic_linking)
 }
 
-fn parse_python_build(node: &Node) -> Result<PythonBuild, ParseError> {
+pub fn parse_python(node: &Node) -> Result<PythonBuild, ParseError> {
     let mapping = node.as_mapping().ok_or_else(|| {
         ParseError::expected_type("mapping", "non-mapping", get_span(node))
             .with_message("Expected 'python' to be a mapping")
@@ -643,7 +643,7 @@ fn parse_prefix_ignore(node: &Node) -> Result<PrefixIgnore, ParseError> {
     )
 }
 
-fn parse_prefix_detection(node: &Node) -> Result<PrefixDetection, ParseError> {
+pub fn parse_prefix_detection(node: &Node) -> Result<PrefixDetection, ParseError> {
     let mapping = node.as_mapping().ok_or_else(|| {
         ParseError::expected_type("mapping", "non-mapping", get_span(node))
             .with_message("Expected 'prefix_detection' to be a mapping")
@@ -730,7 +730,7 @@ fn parse_post_process(node: &Node) -> Result<PostProcess, ParseError> {
 
 /// Parse post_process list section from YAML (expects a sequence)
 /// Returns a ConditionalList<PostProcess> which supports if/then/else conditionals
-fn parse_post_process_list(node: &Node) -> Result<ConditionalList<PostProcess>, ParseError> {
+pub fn parse_post_process_list(node: &Node) -> Result<ConditionalList<PostProcess>, ParseError> {
     let sequence = node.as_sequence().ok_or_else(|| {
         ParseError::expected_type("sequence", "non-sequence", get_span(node))
             .with_message("Expected 'post_process' to be a list")

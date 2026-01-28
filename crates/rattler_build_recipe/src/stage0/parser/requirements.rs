@@ -82,7 +82,7 @@ pub fn parse_requirements(yaml: &MarkedNode) -> ParseResult<Requirements> {
 /// Supports two forms:
 /// 1. Direct list (defaults to weak): `run_exports: [pkg1, pkg2]`
 /// 2. Mapping with fields: `run_exports: { strong: [pkg1], weak: [pkg2] }`
-fn parse_run_exports(yaml: &MarkedNode) -> ParseResult<RunExports> {
+pub fn parse_run_exports(yaml: &MarkedNode) -> ParseResult<RunExports> {
     // Check if it's a direct list (defaults to weak)
     if yaml.as_sequence().is_some() {
         let weak = parse_conditional_list(yaml)?;
@@ -168,7 +168,7 @@ impl NodeConverter<PackageName> for IgnoreListConverter {
 }
 
 /// Parse an IgnoreRunExports section
-pub(crate) fn parse_ignore_run_exports(yaml: &MarkedNode) -> ParseResult<IgnoreRunExports> {
+pub fn parse_ignore_run_exports(yaml: &MarkedNode) -> ParseResult<IgnoreRunExports> {
     // Validate field names first
     yaml.validate_keys("ignore_run_exports", &["by_name", "from_package"])?;
 

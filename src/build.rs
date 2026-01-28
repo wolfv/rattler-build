@@ -3,7 +3,7 @@
 use std::{path::PathBuf, vec};
 
 use miette::{Context, IntoDiagnostic};
-use rattler_build_recipe::stage1::TestType;
+use rattler_build_recipe::stage1::{GlobVec, TestType};
 use rattler_build_script::InterpreterError;
 use rattler_conda_types::{Channel, MatchSpec, Platform, package::PathsJson};
 
@@ -11,6 +11,7 @@ use crate::{
     apply_patch_custom,
     metadata::{Output, build_reindexed_channels},
     package_test::PackageContentsTestExt as _,
+    packaging::{Files, package_conda},
     render::{resolved_dependencies::RunExportsDownload, solver::load_repodatas},
     tool_configuration,
 };
@@ -105,13 +106,13 @@ pub async fn skip_existing(
 }
 
 /// Run the build for the given output. This will fetch the sources, resolve the
-/// dependencies, and execute the build script. Returns the path to the
-/// resulting package.
+/// dependencies, and execute the build script. Returns the paths to the
+/// resulting packages (parent + subpackages if any).
 pub async fn run_build(
     mut output: Output,
     tool_configuration: &tool_configuration::Configuration,
     working_directory_behavior: WorkingDirectoryBehavior,
-) -> miette::Result<(Output, PathBuf)> {
+) -> miette::Result<Vec<(Output, PathBuf)>> {
     let cleanup = matches!(
         working_directory_behavior,
         WorkingDirectoryBehavior::Cleanup
@@ -174,16 +175,167 @@ pub async fn run_build(
         }
     }
 
-    // Package all the new files
-    let (result, paths_json) = output
-        .create_package(tool_configuration)
-        .await
-        .into_diagnostic()?;
+    // Package the output(s)
+    let results = if output.recipe.sub_packages.is_empty() {
+        // No subpackages - use existing flow
+        let (result, paths_json) = output
+            .create_package(tool_configuration)
+            .await
+            .into_diagnostic()?;
+
+        // Check for binary prefix if configured
+        if tool_configuration.error_prefix_in_binary {
+            tracing::info!("Checking for embedded prefix in binary files...");
+            check_for_binary_prefix(&output, &paths_json)?;
+        }
+
+        // Check for symlinks on Windows if not allowed
+        if (output.build_configuration.target_platform.is_windows()
+            || output.build_configuration.target_platform == Platform::NoArch)
+            && !tool_configuration.allow_symlinks_on_windows
+        {
+            tracing::info!("Checking for symlinks ...");
+            check_for_symlinks_on_windows(&output, &paths_json)?;
+        }
+
+        output.record_artifact(&result, &paths_json);
+
+        let span = tracing::info_span!("Running package tests");
+        let enter = span.enter();
+
+        // We run all the package content tests
+        for test in output.recipe.tests() {
+            if let TestType::PackageContents { package_contents } = test {
+                package_contents
+                    .run_test(&paths_json, &output)
+                    .into_diagnostic()?;
+            }
+        }
+
+        drop(enter);
+
+        vec![(output, result)]
+    } else {
+        // Has subpackages - split files and package each
+        package_with_subpackages(&output, tool_configuration).await?
+    };
+
+    if !tool_configuration.no_clean {
+        directories.clean().into_diagnostic()?;
+    }
+
+    Ok(results)
+}
+
+/// Package an output that has subpackages.
+///
+/// This function:
+/// 1. Collects all new files from the prefix
+/// 2. Splits files between subpackages based on their glob patterns
+/// 3. Packages each subpackage with its matched files
+/// 4. Packages the parent with the remaining files
+async fn package_with_subpackages(
+    output: &Output,
+    tool_configuration: &tool_configuration::Configuration,
+) -> miette::Result<Vec<(Output, PathBuf)>> {
+    let span = tracing::info_span!("Packaging with subpackages");
+    let _enter = span.enter();
+
+    // Collect all new files from the prefix (without filtering by parent's build.files)
+    let all_files = Files::from_prefix(
+        &output.build_configuration.directories.host_prefix,
+        &output.recipe.build().always_include_files,
+        &GlobVec::default(), // Don't filter - we'll split files manually
+    )
+    .into_diagnostic()?;
+
+    // Build the subpackage splits: (name, glob_patterns) pairs
+    let subpackage_splits: Vec<(String, GlobVec)> = output
+        .recipe
+        .sub_packages
+        .iter()
+        .map(|sp| {
+            (
+                sp.package.name().as_normalized().to_string(),
+                sp.build.files.clone(),
+            )
+        })
+        .collect();
+
+    // Split files between subpackages and parent
+    let (parent_files, subpackage_file_splits) = all_files.split_for_subpackages(&subpackage_splits);
+
+    let mut results = Vec::new();
+
+    // Package each subpackage
+    for (subpackage, (_name, matched_files)) in output
+        .recipe
+        .sub_packages
+        .iter()
+        .zip(subpackage_file_splits.iter())
+    {
+        let subpackage_output = output.for_subpackage(subpackage);
+
+        // Create Files struct for this subpackage
+        let subpackage_files = Files {
+            new_files: matched_files.clone(),
+            old_files: all_files.old_files.clone(),
+            prefix: all_files.prefix.clone(),
+        };
+
+        let span = tracing::info_span!(
+            "Packaging subpackage",
+            name = subpackage.package.name().as_normalized()
+        );
+        let _enter = span.enter();
+
+        let (result, paths_json) =
+            package_conda(&subpackage_output, tool_configuration, &subpackage_files)
+                .into_diagnostic()?;
+
+        // Check for binary prefix if configured
+        if tool_configuration.error_prefix_in_binary {
+            check_for_binary_prefix(&subpackage_output, &paths_json)?;
+        }
+
+        // Check for symlinks on Windows if not allowed
+        if (subpackage_output.build_configuration.target_platform.is_windows()
+            || subpackage_output.build_configuration.target_platform == Platform::NoArch)
+            && !tool_configuration.allow_symlinks_on_windows
+        {
+            check_for_symlinks_on_windows(&subpackage_output, &paths_json)?;
+        }
+
+        subpackage_output.record_artifact(&result, &paths_json);
+
+        // Run package content tests for subpackage
+        for test in &subpackage.tests {
+            if let TestType::PackageContents { package_contents } = test {
+                package_contents
+                    .run_test(&paths_json, &subpackage_output)
+                    .into_diagnostic()?;
+            }
+        }
+
+        results.push((subpackage_output, result));
+    }
+
+    // Package the parent with remaining files
+    let parent_files_struct = Files {
+        new_files: parent_files,
+        old_files: all_files.old_files,
+        prefix: all_files.prefix,
+    };
+
+    let span = tracing::info_span!("Packaging parent", name = output.name().as_normalized());
+    let _enter = span.enter();
+
+    let (result, paths_json) =
+        package_conda(output, tool_configuration, &parent_files_struct).into_diagnostic()?;
 
     // Check for binary prefix if configured
     if tool_configuration.error_prefix_in_binary {
-        tracing::info!("Checking for embedded prefix in binary files...");
-        check_for_binary_prefix(&output, &paths_json)?;
+        check_for_binary_prefix(output, &paths_json)?;
     }
 
     // Check for symlinks on Windows if not allowed
@@ -191,35 +343,23 @@ pub async fn run_build(
         || output.build_configuration.target_platform == Platform::NoArch)
         && !tool_configuration.allow_symlinks_on_windows
     {
-        tracing::info!("Checking for symlinks ...");
-        check_for_symlinks_on_windows(&output, &paths_json)?;
+        check_for_symlinks_on_windows(output, &paths_json)?;
     }
 
     output.record_artifact(&result, &paths_json);
 
-    let span = tracing::info_span!("Running package tests");
-    let enter = span.enter();
-
-    // We run all the package content tests
+    // Run package content tests for parent
     for test in output.recipe.tests() {
         if let TestType::PackageContents { package_contents } = test {
             package_contents
-                .run_test(&paths_json, &output)
+                .run_test(&paths_json, output)
                 .into_diagnostic()?;
         }
     }
 
-    if !tool_configuration.no_clean {
-        directories.clean().into_diagnostic()?;
-    }
+    results.push((output.clone(), result));
 
-    drop(enter);
-
-    if !tool_configuration.no_clean {
-        directories.clean().into_diagnostic()?;
-    }
-
-    Ok((output, result))
+    Ok(results)
 }
 
 /// Check if any binary files contain the host prefix

@@ -210,6 +210,13 @@ fn parse_single_output_recipe(yaml: &MarkedNode) -> ParseResult<crate::stage0::S
         crate::stage0::ConditionalList::default()
     };
 
+    // Parse optional sub_packages section
+    let sub_packages = if let Some(sub_packages_node) = mapping.get("sub_packages") {
+        output_parser::parse_sub_packages(sub_packages_node)?
+    } else {
+        Vec::new()
+    };
+
     // Check for unknown top-level fields
     for (key, _) in mapping.iter() {
         let key_str = key.as_str();
@@ -224,13 +231,14 @@ fn parse_single_output_recipe(yaml: &MarkedNode) -> ParseResult<crate::stage0::S
                 | "tests"
                 | "schema_version"
                 | "context"
+                | "sub_packages"
         ) {
             return Err(ParseError::invalid_value(
                 "recipe",
                 format!("unknown top-level field '{}'", key_str),
                 *key.span(),
             )
-            .with_suggestion("valid top-level fields are: package, build, about, requirements, extra, source, tests, schema_version, context"));
+            .with_suggestion("valid top-level fields are: package, build, about, requirements, extra, source, tests, schema_version, context, sub_packages"));
         }
     }
 
@@ -244,6 +252,7 @@ fn parse_single_output_recipe(yaml: &MarkedNode) -> ParseResult<crate::stage0::S
         extra,
         source,
         tests,
+        sub_packages,
     })
 }
 

@@ -256,14 +256,16 @@ pub async fn run<B: Backend>(
                             )
                             .await
                             {
-                                Ok((output, _archive)) => {
-                                    output.record_build_end();
-                                    let span = tracing::info_span!("Build summary");
-                                    let _enter = span.enter();
-                                    let _ = output.log_build_summary().map_err(|e| {
-                                        tracing::error!("Error writing build summary: {}", e);
-                                        e
-                                    });
+                                Ok(results) => {
+                                    for (output, _archive) in results {
+                                        output.record_build_end();
+                                        let span = tracing::info_span!("Build summary");
+                                        let _enter = span.enter();
+                                        let _ = output.log_build_summary().map_err(|e| {
+                                            tracing::error!("Error writing build summary: {}", e);
+                                            e
+                                        });
+                                    }
                                     log_sender
                                         .send(Event::SetBuildState(i, BuildProgress::Done))
                                         .unwrap();

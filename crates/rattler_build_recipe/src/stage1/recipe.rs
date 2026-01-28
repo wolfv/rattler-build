@@ -99,6 +99,107 @@ fn default_schema_version() -> u64 {
     1
 }
 
+/// Evaluated subpackage definition
+///
+/// Subpackages split files from a parent build into separate packages.
+/// They share the build output of the parent and only differ in file selection and metadata.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubPackage {
+    /// Package information (name, version)
+    pub package: Package,
+
+    /// Build configuration (file selection and post-processing only)
+    #[serde(default, skip_serializing_if = "SubPackageBuild::is_default")]
+    pub build: SubPackageBuild,
+
+    /// Requirements (run-time only)
+    #[serde(default, skip_serializing_if = "SubPackageRequirements::is_empty")]
+    pub requirements: SubPackageRequirements,
+
+    /// About metadata
+    #[serde(default, skip_serializing_if = "About::is_empty")]
+    pub about: About,
+
+    /// Tests
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<TestType>,
+}
+
+/// Evaluated subpackage build configuration
+///
+/// Only contains fields relevant for subpackages (file selection and post-processing).
+/// Does not include script, number, or other build-time fields.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubPackageBuild {
+    /// Files to include in this subpackage (validated glob patterns)
+    #[serde(default, skip_serializing_if = "super::GlobVec::is_empty")]
+    pub files: super::GlobVec,
+
+    /// Noarch type - can differ from parent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub noarch: Option<rattler_conda_types::NoArchType>,
+
+    /// Python-specific configuration
+    #[serde(default, skip_serializing_if = "super::PythonBuild::is_default")]
+    pub python: super::PythonBuild,
+
+    /// Dynamic linking configuration
+    #[serde(default, skip_serializing_if = "super::DynamicLinking::is_default")]
+    pub dynamic_linking: super::DynamicLinking,
+
+    /// Prefix detection configuration
+    #[serde(default, skip_serializing_if = "super::PrefixDetection::is_default")]
+    pub prefix_detection: super::PrefixDetection,
+
+    /// Post-processing operations
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_process: Vec<super::PostProcess>,
+}
+
+impl SubPackageBuild {
+    /// Check if this is a default build configuration
+    pub fn is_default(&self) -> bool {
+        self.files.is_empty()
+            && self.noarch.is_none()
+            && self.python.is_default()
+            && self.dynamic_linking.is_default()
+            && self.prefix_detection.is_default()
+            && self.post_process.is_empty()
+    }
+}
+
+/// Evaluated subpackage requirements
+///
+/// Only contains run-time requirements (no build/host).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SubPackageRequirements {
+    /// Runtime dependencies
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run: Vec<super::Dependency>,
+
+    /// Runtime constraints
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub run_constraints: Vec<super::Dependency>,
+
+    /// Run exports from this subpackage
+    #[serde(default, skip_serializing_if = "super::RunExports::is_empty")]
+    pub run_exports: super::RunExports,
+
+    /// Ignore run exports from specific packages
+    #[serde(default, skip_serializing_if = "super::IgnoreRunExports::is_empty")]
+    pub ignore_run_exports: super::IgnoreRunExports,
+}
+
+impl SubPackageRequirements {
+    /// Check if requirements are empty
+    pub fn is_empty(&self) -> bool {
+        self.run.is_empty()
+            && self.run_constraints.is_empty()
+            && self.run_exports.is_empty()
+            && self.ignore_run_exports.is_empty()
+    }
+}
+
 /// Evaluated recipe with all templates and conditionals resolved
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
@@ -150,6 +251,12 @@ pub struct Recipe {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inherits_from: Option<InheritsFrom>,
 
+    /// Subpackages - split files from this build into multiple packages.
+    /// Each subpackage gets a subset of files based on glob patterns,
+    /// and the parent package gets the remaining files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_packages: Vec<SubPackage>,
+
     /// Used variant - the subset of variant variables that were actually accessed
     /// during recipe evaluation (plus always-included variables like target_platform)
     #[serde(skip)]
@@ -182,6 +289,7 @@ impl Recipe {
             context,
             staging_caches: Vec::new(),
             inherits_from: None,
+            sub_packages: Vec::new(),
             used_variant,
         }
     }
@@ -213,6 +321,7 @@ impl Recipe {
             context,
             staging_caches,
             inherits_from,
+            sub_packages: Vec::new(),
             used_variant,
         }
     }

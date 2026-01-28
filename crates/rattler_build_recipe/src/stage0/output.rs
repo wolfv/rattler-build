@@ -8,13 +8,15 @@ use serde::Serialize;
 
 use crate::stage0::{
     about::About,
-    build::Build,
+    build::{Build, DynamicLinking, PostProcess, PrefixDetection, PythonBuild},
     package::{Package, PackageMetadata},
-    requirements::Requirements,
+    requirements::{IgnoreRunExports, Requirements, RunExports},
     source::Source,
     tests::TestType,
-    types::{ConditionalList, Item, Value},
+    types::{ConditionalList, IncludeExclude, Item, Value},
+    SerializableMatchSpec,
 };
+use rattler_conda_types::NoArchType;
 
 /// A recipe can be either a single-output or multi-output recipe
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -46,6 +48,12 @@ pub struct SingleOutputRecipe {
     pub source: ConditionalList<Source>,
     #[serde(default, skip_serializing_if = "ConditionalList::is_empty")]
     pub tests: ConditionalList<TestType>,
+
+    /// Subpackages - split files from this build into multiple packages.
+    /// Each subpackage gets a subset of files based on glob patterns,
+    /// and the parent package gets the remaining files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_packages: Vec<SubPackage>,
 }
 
 /// Multi-output recipe with staging support
@@ -183,6 +191,12 @@ pub struct PackageOutput {
     /// Tests for this output
     #[serde(default, skip_serializing_if = "ConditionalList::is_empty")]
     pub tests: ConditionalList<TestType>,
+
+    /// Subpackages - split files from this output's build into multiple packages.
+    /// Each subpackage gets a subset of files based on glob patterns,
+    /// and the parent package gets the remaining files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_packages: Vec<SubPackage>,
 }
 
 /// Serialize TopLevel as null
@@ -217,6 +231,87 @@ pub struct CacheInherit {
 
     /// Whether to inherit run_exports (default: true)
     pub run_exports: bool,
+}
+
+/// A subpackage definition - splits files from the parent build.
+///
+/// Subpackages share the build output of the parent package and only differ
+/// in file selection and metadata. Unlike multi-output recipes with `outputs:`,
+/// subpackages don't run their own build scripts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SubPackage {
+    /// Package metadata (name is required, version is optional and inherits from parent)
+    pub package: PackageMetadata,
+
+    /// Build configuration (only file selection and post-processing allowed)
+    #[serde(default)]
+    pub build: SubPackageBuild,
+
+    /// Requirements for this subpackage (only run/run_constraints/run_exports allowed)
+    #[serde(default)]
+    pub requirements: SubPackageRequirements,
+
+    /// About information for this subpackage (inherits from parent if not specified)
+    #[serde(default)]
+    pub about: About,
+
+    /// Tests for this subpackage
+    #[serde(default, skip_serializing_if = "ConditionalList::is_empty")]
+    pub tests: ConditionalList<TestType>,
+}
+
+/// Build configuration for subpackages - only file selection and post-processing.
+///
+/// Note: `script` and `number` are not allowed since subpackages share
+/// the parent's build output and don't run their own build scripts.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct SubPackageBuild {
+    /// Files to include in this subpackage (glob patterns).
+    /// These files are REMOVED from the parent package.
+    #[serde(default)]
+    pub files: IncludeExclude,
+
+    /// Noarch type - can differ from parent
+    pub noarch: Option<Value<NoArchType>>,
+
+    /// Python-specific configuration (entry_points, etc.)
+    #[serde(default)]
+    pub python: PythonBuild,
+
+    /// Dynamic linking configuration
+    #[serde(default)]
+    pub dynamic_linking: DynamicLinking,
+
+    /// Prefix detection configuration
+    #[serde(default)]
+    pub prefix_detection: PrefixDetection,
+
+    /// Post-processing operations
+    #[serde(default)]
+    pub post_process: ConditionalList<PostProcess>,
+}
+
+/// Requirements for subpackages - only run-time requirements allowed.
+///
+/// Note: `build` and `host` requirements are not allowed since subpackages
+/// don't run their own build scripts.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct SubPackageRequirements {
+    /// Run-time dependencies
+    #[serde(default, skip_serializing_if = "ConditionalList::is_empty")]
+    pub run: ConditionalList<SerializableMatchSpec>,
+
+    /// Run constraints
+    #[serde(default, skip_serializing_if = "ConditionalList::is_empty")]
+    pub run_constraints: ConditionalList<SerializableMatchSpec>,
+
+    /// Run exports from this subpackage
+    #[serde(default, skip_serializing_if = "RunExports::is_empty")]
+    pub run_exports: RunExports,
+
+    /// Ignore run exports from specific packages
+    #[serde(default, skip_serializing_if = "IgnoreRunExports::is_empty")]
+    pub ignore_run_exports: IgnoreRunExports,
 }
 
 impl Recipe {
@@ -261,6 +356,7 @@ impl SingleOutputRecipe {
             extra,
             source,
             tests,
+            sub_packages,
         } = self;
 
         let mut vars = package.used_variables();
@@ -276,6 +372,9 @@ impl SingleOutputRecipe {
         }
         for value in context.values() {
             vars.extend(value.used_variables());
+        }
+        for sub_pkg in sub_packages {
+            vars.extend(sub_pkg.used_variables());
         }
         vars.sort();
         vars.dedup();
@@ -458,6 +557,7 @@ impl PackageOutput {
             build,
             about,
             tests,
+            sub_packages,
         } = self;
 
         let mut vars = package.used_variables();
@@ -470,6 +570,9 @@ impl PackageOutput {
         vars.extend(about.used_variables());
         for test_item in tests {
             vars.extend(collect_test_item_variables(test_item));
+        }
+        for sub_pkg in sub_packages {
+            vars.extend(sub_pkg.used_variables());
         }
         vars.sort();
         vars.dedup();
@@ -502,6 +605,144 @@ impl Inherit {
             Inherit::CacheName(name) => name.used_variables(),
             Inherit::CacheWithOptions(options) => options.from.used_variables(),
         }
+    }
+}
+
+impl SubPackage {
+    /// Get all used variables in this subpackage
+    pub fn used_variables(&self) -> Vec<String> {
+        let SubPackage {
+            package,
+            build,
+            requirements,
+            about,
+            tests,
+        } = self;
+
+        let mut vars = package.used_variables();
+        vars.extend(build.used_variables());
+        vars.extend(requirements.used_variables());
+        vars.extend(about.used_variables());
+        for test_item in tests {
+            vars.extend(collect_test_item_variables(test_item));
+        }
+        vars.sort();
+        vars.dedup();
+        vars
+    }
+
+    /// Get all free specs (specs without version or build constraints) in this subpackage
+    pub fn free_specs(&self) -> Vec<rattler_conda_types::PackageName> {
+        self.requirements.free_specs()
+    }
+}
+
+impl SubPackageBuild {
+    /// Get all used variables in this subpackage build configuration
+    pub fn used_variables(&self) -> Vec<String> {
+        let SubPackageBuild {
+            files,
+            noarch,
+            python,
+            dynamic_linking,
+            prefix_detection,
+            post_process,
+        } = self;
+
+        let mut vars = files.used_variables();
+
+        if let Some(noarch) = noarch {
+            vars.extend(noarch.used_variables());
+        }
+
+        // Python build
+        vars.extend(python.entry_points.used_variables());
+        vars.extend(python.skip_pyc_compilation.used_variables());
+        vars.extend(python.use_python_app_entrypoint.used_variables());
+        if let Some(version_independent) = &python.version_independent {
+            vars.extend(version_independent.used_variables());
+        }
+        if let Some(site_packages_path) = &python.site_packages_path {
+            vars.extend(site_packages_path.used_variables());
+        }
+
+        // Dynamic linking
+        vars.extend(dynamic_linking.rpaths.used_variables());
+        match &dynamic_linking.binary_relocation {
+            crate::stage0::build::BinaryRelocation::Boolean(val) => {
+                vars.extend(val.used_variables());
+            }
+            crate::stage0::build::BinaryRelocation::Patterns(list) => {
+                vars.extend(list.used_variables());
+            }
+        }
+        vars.extend(dynamic_linking.missing_dso_allowlist.used_variables());
+        vars.extend(dynamic_linking.rpath_allowlist.used_variables());
+        if let Some(overdepending_behavior) = &dynamic_linking.overdepending_behavior {
+            vars.extend(overdepending_behavior.used_variables());
+        }
+        if let Some(overlinking_behavior) = &dynamic_linking.overlinking_behavior {
+            vars.extend(overlinking_behavior.used_variables());
+        }
+
+        // Prefix detection
+        vars.extend(prefix_detection.force_file_type.text.used_variables());
+        vars.extend(prefix_detection.force_file_type.binary.used_variables());
+        match &prefix_detection.ignore {
+            crate::stage0::build::PrefixIgnore::Boolean(val) => {
+                vars.extend(val.used_variables());
+            }
+            crate::stage0::build::PrefixIgnore::Patterns(list) => {
+                vars.extend(list.used_variables());
+            }
+        }
+        vars.extend(prefix_detection.ignore_binary_files.used_variables());
+
+        // Post-process
+        vars.extend(post_process.used_variables());
+
+        vars.sort();
+        vars.dedup();
+        vars
+    }
+}
+
+impl SubPackageRequirements {
+    /// Check if all requirements are empty
+    pub fn is_empty(&self) -> bool {
+        self.run.is_empty()
+            && self.run_constraints.is_empty()
+            && self.run_exports.is_empty()
+            && self.ignore_run_exports.is_empty()
+    }
+
+    /// Collect all variables used in requirements
+    pub fn used_variables(&self) -> Vec<String> {
+        let SubPackageRequirements {
+            run,
+            run_constraints,
+            run_exports,
+            ignore_run_exports,
+        } = self;
+
+        let mut vars = Vec::new();
+
+        vars.extend(run.used_variables());
+        vars.extend(run_constraints.used_variables());
+        vars.extend(run_exports.used_variables());
+        vars.extend(ignore_run_exports.used_variables());
+
+        vars.sort();
+        vars.dedup();
+        vars
+    }
+
+    /// Find all matchspecs that are free (i.e. do not have a version or build constraint)
+    pub fn free_specs(&self) -> Vec<rattler_conda_types::PackageName> {
+        // Subpackages only have run requirements, and free specs are typically
+        // only considered for build/host dependencies for variant computation.
+        // Return empty for now.
+        Vec::new()
     }
 }
 

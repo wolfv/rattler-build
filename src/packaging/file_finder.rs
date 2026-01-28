@@ -212,6 +212,68 @@ impl Files {
         })
     }
 
+    /// Split files for subpackages based on glob patterns.
+    ///
+    /// For each subpackage, files matching its glob patterns are extracted from the
+    /// new_files set. Files are removed from the set as they are matched, so each file
+    /// can only go to one subpackage (in order of definition).
+    ///
+    /// Returns a tuple of:
+    /// - The remaining files (files not claimed by any subpackage)
+    /// - A vector of (name, matched_files) for each subpackage
+    ///
+    /// # Arguments
+    /// * `subpackages` - A slice of (package_name, glob_patterns) pairs
+    pub fn split_for_subpackages(
+        &self,
+        subpackages: &[(String, GlobVec)],
+    ) -> (HashSet<PathBuf>, Vec<(String, HashSet<PathBuf>)>) {
+        let mut remaining = self.new_files.clone();
+        let mut subpackage_files = Vec::with_capacity(subpackages.len());
+
+        for (name, globs) in subpackages {
+            if globs.is_empty() {
+                // No files specified, subpackage gets no files
+                subpackage_files.push((name.clone(), HashSet::new()));
+                continue;
+            }
+
+            let matched: HashSet<PathBuf> = remaining
+                .iter()
+                .filter(|f| {
+                    let rel = f
+                        .strip_prefix(&self.prefix)
+                        .expect("File should be in prefix");
+                    globs.is_match(rel)
+                })
+                .cloned()
+                .collect();
+
+            // Warn if no files matched for this subpackage
+            if matched.is_empty() {
+                tracing::warn!(
+                    "Subpackage '{}' has file patterns but no files matched",
+                    name
+                );
+            } else {
+                tracing::info!(
+                    "Subpackage '{}' matched {} files",
+                    name,
+                    matched.len()
+                );
+            }
+
+            // Remove matched files from remaining
+            for file in &matched {
+                remaining.remove(file);
+            }
+
+            subpackage_files.push((name.clone(), matched));
+        }
+
+        (remaining, subpackage_files)
+    }
+
     /// Copy the new files to a temporary directory and return the temporary directory and the files that were copied.
     pub fn to_temp_folder(&self, output: &Output) -> Result<TempFiles, PackagingError> {
         let temp_dir = TempDir::with_prefix(output.name().as_normalized())?;

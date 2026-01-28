@@ -480,6 +480,20 @@ pub async fn get_build_output(
             },
         );
 
+        // Also add sub_packages to the subpackages map so pin_subpackage can reference them
+        for sub_package in &recipe.sub_packages {
+            subpackages.insert(
+                sub_package.package.name().clone(),
+                PackageIdentifier {
+                    name: sub_package.package.name().clone(),
+                    // Sub-packages inherit version from parent
+                    version: sub_package.package.version().clone(),
+                    // Sub-packages inherit build_string from parent
+                    build_string: discovered_output.build_string.clone(),
+                },
+            );
+        }
+
         // Use the global build name for outputs that inherit from staging caches
         // This ensures staging caches and their dependent packages share the same build directory
         // Otherwise, use the output's own name for the build directory
@@ -709,30 +723,34 @@ pub async fn run_build_from_args(
         .map(|o| o.name())
         .collect::<Vec<_>>();
     tracing::info!("Starting build of {} outputs", outputs_to_build.len());
-    for (index, output) in outputs_to_build.iter().enumerate() {
-        let (output, archive) = match run_build(
-            output.clone(),
+    for (index, original_output) in outputs_to_build.iter().enumerate() {
+        let build_results = match run_build(
+            original_output.clone(),
             &tool_configuration,
             WorkingDirectoryBehavior::Cleanup,
         )
         .boxed_local()
         .await
         {
-            Ok((output, archive)) => {
-                output.record_build_end();
-                (output, archive)
+            Ok(results) => {
+                for (output, _) in &results {
+                    output.record_build_end();
+                }
+                results
             }
             Err(e) => {
                 if tool_configuration.continue_on_failure == ContinueOnFailure::Yes {
-                    tracing::error!("Build failed for {}: {}", output.identifier(), e);
-                    output.record_warning(&format!("Build failed: {}", e));
+                    tracing::error!("Build failed for {}: {}", original_output.identifier(), e);
+                    original_output.record_warning(&format!("Build failed: {}", e));
                     continue;
                 }
                 return Err(e);
             }
         };
 
-        outputs.push(output.clone());
+        // Process all build results (parent + any subpackages)
+        for (output, archive) in build_results {
+            outputs.push(output.clone());
 
         // We can now run the tests for the output. However, we need to check if
         // all dependencies that are needed for the test are already built.
@@ -851,6 +869,7 @@ pub async fn run_build_from_args(
                 }
             }
         }
+        } // Close the inner `for (output, archive) in build_results` loop
     }
 
     let span = tracing::info_span!("Build summary");
@@ -1107,8 +1126,14 @@ pub async fn rebuild_package_core(
         .recreate_directories()
         .into_diagnostic()?;
 
-    let (rebuilt_output, temp_rebuilt_path) =
+    let build_results =
         run_build(output, &tool_config, WorkingDirectoryBehavior::Cleanup).await?;
+
+    // For rebuild, we expect only one output (no subpackages support for now)
+    let (rebuilt_output, temp_rebuilt_path) = build_results
+        .into_iter()
+        .next()
+        .ok_or_else(|| miette::miette!("No build output was produced"))?;
 
     // Generate timestamp for the rebuilt package
     let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
@@ -1385,22 +1410,24 @@ async fn build_and_collect_packages(
     let mut package_paths = Vec::new();
     let outputs_to_build = skip_existing(build_output, tool_configuration).await?;
 
-    for output in outputs_to_build.iter() {
-        let (_output, archive) = match run_build(
-            output.clone(),
+    for original_output in outputs_to_build.iter() {
+        let build_results = match run_build(
+            original_output.clone(),
             tool_configuration,
             WorkingDirectoryBehavior::Cleanup,
         )
         .boxed_local()
         .await
         {
-            Ok((output, archive)) => {
-                output.record_build_end();
-                (output, archive)
+            Ok(results) => {
+                for (output, _) in &results {
+                    output.record_build_end();
+                }
+                results
             }
             Err(e) => {
                 if tool_configuration.continue_on_failure == ContinueOnFailure::Yes {
-                    tracing::error!("Build failed for {}: {}", output.identifier(), e);
+                    tracing::error!("Build failed for {}: {}", original_output.identifier(), e);
                     continue;
                 } else {
                     return Err(e);
@@ -1408,7 +1435,10 @@ async fn build_and_collect_packages(
             }
         };
 
-        package_paths.push(archive);
+        // Collect all package paths (parent + subpackages)
+        for (_output, archive) in build_results {
+            package_paths.push(archive);
+        }
     }
 
     Ok(package_paths)

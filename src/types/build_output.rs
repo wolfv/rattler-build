@@ -343,6 +343,194 @@ impl BuildOutput {
                 .map(|n| n.is_python())
                 .unwrap_or(false)
     }
+
+    /// Create an Output for a subpackage.
+    ///
+    /// This creates a modified Output with:
+    /// - Recipe's package info from the subpackage
+    /// - Recipe's about info from the subpackage (inheriting from parent if not specified)
+    /// - Recipe's tests from the subpackage
+    /// - Build configuration inherited from parent (same directories, platform, etc.)
+    /// - Finalized dependencies with subpackage's run requirements
+    pub fn for_subpackage(
+        &self,
+        subpackage: &rattler_build_recipe::stage1::SubPackage,
+    ) -> Self {
+        use rattler_build_recipe::stage1::{About, Build, Requirements};
+        use crate::render::resolved_dependencies::{
+            DependencyInfo, FinalizedRunDependencies, SourceDependency,
+        };
+
+        // Create a modified recipe for the subpackage
+        let mut subpackage_recipe = self.recipe.clone();
+
+        // Replace package info
+        subpackage_recipe.package = subpackage.package.clone();
+
+        // Replace about info (subpackage's about, with inheritance from parent)
+        let parent_about = &self.recipe.about;
+        subpackage_recipe.about = About {
+            homepage: subpackage.about.homepage.clone().or_else(|| parent_about.homepage.clone()),
+            repository: subpackage.about.repository.clone().or_else(|| parent_about.repository.clone()),
+            documentation: subpackage.about.documentation.clone().or_else(|| parent_about.documentation.clone()),
+            license: subpackage.about.license.clone().or_else(|| parent_about.license.clone()),
+            license_file: subpackage
+                .about
+                .license_file
+                .clone()
+                .or_else(|| parent_about.license_file.clone()),
+            license_family: subpackage.about.license_family.clone().or_else(|| parent_about.license_family.clone()),
+            summary: subpackage.about.summary.clone().or_else(|| parent_about.summary.clone()),
+            description: subpackage.about.description.clone().or_else(|| parent_about.description.clone()),
+        };
+
+        // Replace tests
+        subpackage_recipe.tests = subpackage.tests.clone();
+
+        // Modify build section for subpackage
+        // Keep most settings from parent but update subpackage-specific ones
+        let parent_build = &self.recipe.build;
+        subpackage_recipe.build = Build {
+            // Inherit from parent
+            number: parent_build.number,
+            string: parent_build.string.clone(),
+            skip: parent_build.skip.clone(),
+            script: parent_build.script.clone(),
+            always_copy_files: parent_build.always_copy_files.clone(),
+            always_include_files: parent_build.always_include_files.clone(),
+            merge_build_and_host_envs: parent_build.merge_build_and_host_envs,
+            variant: parent_build.variant.clone(),
+            // Override from subpackage
+            noarch: subpackage.build.noarch.or(parent_build.noarch),
+            python: if subpackage.build.python.is_default() {
+                parent_build.python.clone()
+            } else {
+                subpackage.build.python.clone()
+            },
+            files: subpackage.build.files.clone(),
+            dynamic_linking: if subpackage.build.dynamic_linking.is_default() {
+                parent_build.dynamic_linking.clone()
+            } else {
+                subpackage.build.dynamic_linking.clone()
+            },
+            prefix_detection: if subpackage.build.prefix_detection.is_default() {
+                parent_build.prefix_detection.clone()
+            } else {
+                subpackage.build.prefix_detection.clone()
+            },
+            post_process: if subpackage.build.post_process.is_empty() {
+                parent_build.post_process.clone()
+            } else {
+                subpackage.build.post_process.clone()
+            },
+        };
+
+        // Clear sub_packages since subpackages don't have nested subpackages
+        subpackage_recipe.sub_packages = Vec::new();
+
+        // Create modified finalized dependencies for subpackage
+        // Keep build/host from parent, but use subpackage's run requirements
+        let finalized_dependencies = self.finalized_dependencies.as_ref().map(|deps| {
+            // Convert subpackage's run requirements to DependencyInfo
+            let subpackage_run_deps: Vec<DependencyInfo> = subpackage
+                .requirements
+                .run
+                .iter()
+                .filter_map(|dep| {
+                    match dep {
+                        rattler_build_recipe::stage1::Dependency::Spec(spec) => {
+                            Some(SourceDependency { spec: *spec.clone() }.into())
+                        }
+                        rattler_build_recipe::stage1::Dependency::PinSubpackage(pin) => {
+                            // Resolve pin_subpackage using build_configuration.subpackages
+                            if let Some(subpkg_info) = self.build_configuration.subpackages.get(&pin.pin_subpackage.name) {
+                                match pin.pin_subpackage.apply(&subpkg_info.version, &subpkg_info.build_string) {
+                                    Ok(spec) => Some(
+                                        crate::render::resolved_dependencies::PinSubpackageDependency {
+                                            spec,
+                                            name: pin.pin_subpackage.name.as_normalized().to_string(),
+                                            args: pin.pin_subpackage.args.clone(),
+                                        }
+                                        .into(),
+                                    ),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to apply pin_subpackage for {}: {}",
+                                            pin.pin_subpackage.name.as_normalized(),
+                                            e
+                                        );
+                                        None
+                                    }
+                                }
+                            } else {
+                                tracing::warn!(
+                                    "pin_subpackage references unknown package: {}",
+                                    pin.pin_subpackage.name.as_normalized()
+                                );
+                                None
+                            }
+                        }
+                        rattler_build_recipe::stage1::Dependency::PinCompatible(pin) => {
+                            // pin_compatible needs to be resolved against host packages
+                            // For now, just log a warning - this needs more work to properly resolve
+                            tracing::warn!(
+                                "pin_compatible in subpackage requirements not fully supported: {}",
+                                pin.pin_compatible.name.as_normalized()
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect();
+
+            // Convert subpackage's run_constraints to DependencyInfo
+            let subpackage_run_constraints: Vec<DependencyInfo> = subpackage
+                .requirements
+                .run_constraints
+                .iter()
+                .filter_map(|dep| {
+                    match dep {
+                        rattler_build_recipe::stage1::Dependency::Spec(spec) => {
+                            Some(SourceDependency { spec: *spec.clone() }.into())
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+
+            FinalizedDependencies {
+                build: deps.build.clone(),
+                host: deps.host.clone(),
+                run: FinalizedRunDependencies {
+                    depends: subpackage_run_deps,
+                    constraints: subpackage_run_constraints,
+                    run_exports: Default::default(), // Subpackages can have their own run_exports
+                },
+            }
+        });
+
+        // Modify requirements section to use subpackage's requirements
+        subpackage_recipe.requirements = Requirements {
+            build: self.recipe.requirements.build.clone(),
+            host: self.recipe.requirements.host.clone(),
+            run: subpackage.requirements.run.clone(),
+            run_constraints: subpackage.requirements.run_constraints.clone(),
+            run_exports: subpackage.requirements.run_exports.clone(),
+            ignore_run_exports: subpackage.requirements.ignore_run_exports.clone(),
+        };
+
+        Self {
+            recipe: subpackage_recipe,
+            build_configuration: self.build_configuration.clone(),
+            finalized_dependencies,
+            finalized_sources: self.finalized_sources.clone(),
+            finalized_cache_dependencies: self.finalized_cache_dependencies.clone(),
+            finalized_cache_sources: self.finalized_cache_sources.clone(),
+            build_summary: Arc::new(Mutex::new(BuildSummary::default())),
+            system_tools: self.system_tools.clone(),
+            extra_meta: self.extra_meta.clone(),
+        }
+    }
 }
 
 impl Display for BuildOutput {

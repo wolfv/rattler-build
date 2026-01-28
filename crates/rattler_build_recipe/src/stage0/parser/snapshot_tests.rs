@@ -169,3 +169,22 @@ fn test_single_output_compatibility() {
 
     insta::assert_snapshot!(serde_yaml::to_string(&recipe).unwrap());
 }
+
+// ============================================================================
+// Subpackages tests
+// ============================================================================
+
+#[test]
+fn test_subpackages_basic_snapshot() {
+    let source = load_test_recipe("subpackages_basic.yaml");
+    let recipe = parse_recipe_from_source(&source).expect("Failed to parse subpackages recipe");
+    insta::assert_snapshot!(serde_yaml::to_string(&recipe).unwrap());
+}
+
+#[test]
+fn test_subpackages_extract_variables() {
+    let source = load_test_recipe("subpackages_basic.yaml");
+    let recipe = parse_recipe_from_source(&source).expect("Failed to parse subpackages recipe");
+    let vars = recipe.used_variables();
+    insta::assert_debug_snapshot!(vars);
+}

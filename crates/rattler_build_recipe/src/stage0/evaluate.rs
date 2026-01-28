@@ -42,6 +42,10 @@ use crate::{
             PrefixDetection as Stage0PrefixDetection, PrefixIgnore as Stage0PrefixIgnore,
             PythonBuild as Stage0PythonBuild, VariantKeyUsage as Stage0VariantKeyUsage,
         },
+        output::{
+            SubPackage as Stage0SubPackage, SubPackageBuild as Stage0SubPackageBuild,
+            SubPackageRequirements as Stage0SubPackageRequirements,
+        },
         requirements::{
             IgnoreRunExports as Stage0IgnoreRunExports, RunExports as Stage0RunExports,
         },
@@ -69,6 +73,10 @@ use crate::{
             ForceFileType as Stage1ForceFileType, PostProcess as Stage1PostProcess,
             PrefixDetection as Stage1PrefixDetection, PythonBuild as Stage1PythonBuild,
             VariantKeyUsage as Stage1VariantKeyUsage,
+        },
+        recipe::{
+            SubPackage as Stage1SubPackage, SubPackageBuild as Stage1SubPackageBuild,
+            SubPackageRequirements as Stage1SubPackageRequirements,
         },
         requirements::{
             IgnoreRunExports as Stage1IgnoreRunExports, RunExports as Stage1RunExports,
@@ -2738,7 +2746,18 @@ impl Evaluate for Stage0Recipe {
         // added to the variant (which happens in variant_render.rs after evaluation).
         // The build string will remain unresolved until finalize_build_strings() is called.
 
-        Ok(Stage1Recipe::new(
+        // Evaluate subpackages
+        // Evaluate subpackages, inheriting version from parent if not specified
+        let mut sub_packages = Vec::new();
+        for sub_pkg in &self.sub_packages {
+            sub_packages.push(evaluate_subpackage(
+                sub_pkg,
+                &context_with_vars,
+                package.version(),
+            )?);
+        }
+
+        let mut recipe = Stage1Recipe::new(
             package,
             build,
             about,
@@ -2748,7 +2767,10 @@ impl Evaluate for Stage0Recipe {
             tests,
             evaluated_context,
             actual_variant,
-        ))
+        );
+        recipe.sub_packages = sub_packages;
+
+        Ok(recipe)
     }
 }
 
@@ -3373,6 +3395,157 @@ impl Evaluate for crate::stage0::MultiOutputRecipe {
         }
 
         Ok(evaluated_outputs)
+    }
+}
+
+// ============================================================================
+// SubPackage Evaluation
+// ============================================================================
+
+/// Evaluate a subpackage, inheriting the parent's version if not specified
+fn evaluate_subpackage(
+    subpkg: &Stage0SubPackage,
+    context: &EvaluationContext,
+    parent_version: &VersionWithSource,
+) -> Result<Stage1SubPackage, ParseError> {
+    // Evaluate package name as string and parse into PackageName
+    let name_str = evaluate_value_to_string(&subpkg.package.name, context)?;
+    let name = PackageName::from_str(&name_str).map_err(|e| {
+        ParseError::invalid_value(
+            "subpackage name",
+            format!(
+                "invalid value for name: '{}' is not a valid package name: {}",
+                name_str, e
+            ),
+            Span::new_blank(),
+        )
+    })?;
+
+    // Evaluate version, inheriting from parent if not specified
+    let version = match &subpkg.package.version {
+        Some(v) => {
+            let version_str = evaluate_value_to_string(v, context)?;
+            VersionWithSource::from_str(&version_str).map_err(|e| {
+                ParseError::invalid_value(
+                    "subpackage version",
+                    format!(
+                        "invalid value for version: '{}' is not a valid version: {}",
+                        version_str, e
+                    ),
+                    Span::new_blank(),
+                )
+            })?
+        }
+        None => parent_version.clone(),
+    };
+
+    let package = Stage1Package::new(name, version);
+
+    // Evaluate build configuration
+    let build = subpkg.build.evaluate(context)?;
+
+    // Evaluate requirements
+    let requirements = subpkg.requirements.evaluate(context)?;
+
+    // Evaluate about
+    let about = subpkg.about.evaluate(context)?;
+
+    // Evaluate tests
+    let mut tests = Vec::new();
+    for test in &subpkg.tests {
+        tests.extend(evaluate_test(test, context)?);
+    }
+
+    Ok(Stage1SubPackage {
+        package,
+        build,
+        requirements,
+        about,
+        tests,
+    })
+}
+
+impl Evaluate for Stage0SubPackageBuild {
+    type Output = Stage1SubPackageBuild;
+
+    fn evaluate(&self, context: &EvaluationContext) -> Result<Self::Output, ParseError> {
+        // Evaluate files (glob patterns)
+        let files = evaluate_glob_vec(&self.files, context)?;
+
+        // Evaluate noarch
+        let noarch = match &self.noarch {
+            None => None,
+            Some(v) => {
+                if let Some(value) = v.as_concrete() {
+                    Some(*value)
+                } else if let Some(template) = v.as_template() {
+                    let s = render_template(template.source(), context, v.span())?;
+                    serde_json::from_value::<NoArchType>(serde_json::Value::String(s.clone()))
+                        .map(Some)
+                        .map_err(|_| {
+                            ParseError::invalid_value(
+                                "noarch type",
+                                format!(
+                                    "Invalid noarch type '{}'. Expected 'python' or 'generic'",
+                                    s
+                                ),
+                                v.span().copied().unwrap_or(Span::new_blank()),
+                            )
+                        })?
+                } else {
+                    unreachable!("Value must be either concrete or template")
+                }
+            }
+        };
+
+        // Evaluate python configuration
+        let python = self.python.evaluate(context)?;
+
+        // Evaluate dynamic linking
+        let dynamic_linking = self.dynamic_linking.evaluate(context)?;
+
+        // Evaluate prefix detection
+        let prefix_detection = self.prefix_detection.evaluate(context)?;
+
+        // Evaluate post_process
+        let mut post_process = Vec::new();
+        for item in &self.post_process {
+            post_process.extend(evaluate_post_process_item(item, context)?);
+        }
+
+        Ok(Stage1SubPackageBuild {
+            files,
+            noarch,
+            python,
+            dynamic_linking,
+            prefix_detection,
+            post_process,
+        })
+    }
+}
+
+impl Evaluate for Stage0SubPackageRequirements {
+    type Output = Stage1SubPackageRequirements;
+
+    fn evaluate(&self, context: &EvaluationContext) -> Result<Self::Output, ParseError> {
+        // Evaluate run dependencies
+        let run = evaluate_dependency_list(&self.run, context)?;
+
+        // Evaluate run constraints
+        let run_constraints = evaluate_dependency_list(&self.run_constraints, context)?;
+
+        // Evaluate run exports
+        let run_exports = self.run_exports.evaluate(context)?;
+
+        // Evaluate ignore run exports
+        let ignore_run_exports = self.ignore_run_exports.evaluate(context)?;
+
+        Ok(Stage1SubPackageRequirements {
+            run,
+            run_constraints,
+            run_exports,
+            ignore_run_exports,
+        })
     }
 }
 
