@@ -71,6 +71,41 @@ impl From<bool> for ContinueOnFailure {
     }
 }
 
+/// Settings for repodata fetching behavior
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RepodataSettings {
+    /// Whether to use zstd-compressed repodata
+    pub zstd_enabled: bool,
+    /// Whether to use bzip2-compressed repodata
+    pub bz2_enabled: bool,
+    /// Whether to use sharded repodata
+    pub sharded_enabled: bool,
+    /// Whether to use JLAP (JSON Lines Append Protocol)
+    pub jlap_enabled: bool,
+}
+
+impl RepodataSettings {
+    /// Create settings with all formats enabled (default for most use cases)
+    pub fn all_enabled() -> Self {
+        Self {
+            zstd_enabled: true,
+            bz2_enabled: true,
+            sharded_enabled: true,
+            jlap_enabled: false,
+        }
+    }
+
+    /// Create settings from individual flags
+    pub fn new(zstd: bool, bz2: bool, sharded: bool, jlap: bool) -> Self {
+        Self {
+            zstd_enabled: zstd,
+            bz2_enabled: bz2,
+            sharded_enabled: sharded,
+            jlap_enabled: jlap,
+        }
+    }
+}
+
 /// Global configuration for the build
 #[derive(Clone)]
 pub struct Configuration {
@@ -90,17 +125,8 @@ pub struct Configuration {
     /// The strategy to use for running tests
     pub test_strategy: TestStrategy,
 
-    /// Whether to use zstd
-    pub use_zstd: bool,
-
-    /// Whether to use bzip2
-    pub use_bz2: bool,
-
-    /// Whether to use sharded repodata
-    pub use_sharded: bool,
-
-    /// Whether to use JLAP (JSON Lines Append Protocol)
-    pub use_jlap: bool,
+    /// Settings for repodata fetching (zstd, bz2, sharded, jlap)
+    pub repodata_settings: RepodataSettings,
 
     /// Whether to skip existing packages
     pub skip_existing: SkipExisting,
@@ -195,10 +221,7 @@ pub struct ConfigurationBuilder {
     no_clean: bool,
     no_test: bool,
     test_strategy: TestStrategy,
-    use_zstd: bool,
-    use_bz2: bool,
-    use_sharded: bool,
-    use_jlap: bool,
+    repodata_settings: RepodataSettings,
     skip_existing: SkipExisting,
     noarch_build_platform: Option<Platform>,
     channel_config: Option<ChannelConfig>,
@@ -230,10 +253,7 @@ impl ConfigurationBuilder {
             no_clean: false,
             no_test: false,
             test_strategy: TestStrategy::default(),
-            use_zstd: true,
-            use_bz2: true,
-            use_sharded: true,
-            use_jlap: false,
+            repodata_settings: RepodataSettings::all_enabled(),
             skip_existing: SkipExisting::None,
             noarch_build_platform: None,
             channel_config: None,
@@ -371,36 +391,36 @@ impl ConfigurationBuilder {
         }
     }
 
-    /// Whether downloading repodata as `.zst` files is enabled.
-    pub fn with_zstd_repodata_enabled(self, zstd_repodata_enabled: bool) -> Self {
+    /// Set all repodata settings at once.
+    pub fn with_repodata_settings(self, repodata_settings: RepodataSettings) -> Self {
         Self {
-            use_zstd: zstd_repodata_enabled,
+            repodata_settings,
             ..self
         }
+    }
+
+    /// Whether downloading repodata as `.zst` files is enabled.
+    pub fn with_zstd_repodata_enabled(mut self, zstd_repodata_enabled: bool) -> Self {
+        self.repodata_settings.zstd_enabled = zstd_repodata_enabled;
+        self
     }
 
     /// Whether downloading repodata as `.bz2` files is enabled.
-    pub fn with_bz2_repodata_enabled(self, bz2_repodata_enabled: bool) -> Self {
-        Self {
-            use_bz2: bz2_repodata_enabled,
-            ..self
-        }
+    pub fn with_bz2_repodata_enabled(mut self, bz2_repodata_enabled: bool) -> Self {
+        self.repodata_settings.bz2_enabled = bz2_repodata_enabled;
+        self
     }
 
     /// Whether downloading sharded repodata is enabled.
-    pub fn with_sharded_repodata_enabled(self, sharded_repodata_enabled: bool) -> Self {
-        Self {
-            use_sharded: sharded_repodata_enabled,
-            ..self
-        }
+    pub fn with_sharded_repodata_enabled(mut self, sharded_repodata_enabled: bool) -> Self {
+        self.repodata_settings.sharded_enabled = sharded_repodata_enabled;
+        self
     }
 
     /// Whether using JLAP (JSON Lines Append Protocol) is enabled.
-    pub fn with_jlap_enabled(self, jlap_enabled: bool) -> Self {
-        Self {
-            use_jlap: jlap_enabled,
-            ..self
-        }
+    pub fn with_jlap_enabled(mut self, jlap_enabled: bool) -> Self {
+        self.repodata_settings.jlap_enabled = jlap_enabled;
+        self
     }
 
     /// Define the noarch platform
@@ -458,10 +478,10 @@ impl ConfigurationBuilder {
             .with_client(client.get_client().clone())
             .with_channel_config(rattler_repodata_gateway::ChannelConfig {
                 default: rattler_repodata_gateway::SourceConfig {
-                    jlap_enabled: self.use_jlap,
-                    zstd_enabled: self.use_zstd,
-                    bz2_enabled: self.use_bz2,
-                    sharded_enabled: self.use_sharded,
+                    jlap_enabled: self.repodata_settings.jlap_enabled,
+                    zstd_enabled: self.repodata_settings.zstd_enabled,
+                    bz2_enabled: self.repodata_settings.bz2_enabled,
+                    sharded_enabled: self.repodata_settings.sharded_enabled,
                     cache_action: Default::default(),
                 },
                 per_channel: Default::default(),
@@ -479,10 +499,7 @@ impl ConfigurationBuilder {
             source_cache: None, // Built lazily on first use
             no_clean: self.no_clean,
             test_strategy,
-            use_zstd: self.use_zstd,
-            use_bz2: self.use_bz2,
-            use_sharded: self.use_sharded,
-            use_jlap: self.use_jlap,
+            repodata_settings: self.repodata_settings,
             skip_existing: self.skip_existing,
             noarch_build_platform: self.noarch_build_platform,
             channel_config,

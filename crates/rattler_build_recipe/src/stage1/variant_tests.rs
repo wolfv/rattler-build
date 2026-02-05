@@ -12,7 +12,7 @@ mod tests {
     use crate::stage1::{Evaluate, EvaluationContext, HashInfo};
     use indexmap::IndexMap;
     use rattler_build_jinja::{JinjaConfig, Variable};
-    use rattler_build_types::NormalizedKey;
+    use rattler_build_types::{NormalizedKey, PlatformTriple};
     use rattler_conda_types::{NoArchType, Platform};
     use std::collections::BTreeMap;
 
@@ -40,9 +40,7 @@ mod tests {
             .collect();
 
         let jinja_config = JinjaConfig {
-            target_platform,
-            build_platform: target_platform,
-            host_platform: target_platform,
+            platforms: PlatformTriple::new(target_platform, target_platform, target_platform),
             variant: variant_map,
             experimental: false,
             recipe_path: None,

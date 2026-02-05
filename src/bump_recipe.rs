@@ -8,7 +8,6 @@
 use fs_err as fs;
 use indexmap::IndexMap;
 use minijinja::Value;
-use rattler_conda_types::Platform;
 use rattler_digest::Sha256Hash;
 use regex::Regex;
 use reqwest::Client;
@@ -19,6 +18,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use rattler_build_jinja::{Jinja, JinjaConfig};
+use rattler_build_types::PlatformTriple;
 
 /// Errors that can occur during recipe bumping
 #[derive(Debug, Error)]
@@ -572,9 +572,7 @@ pub fn build_url_with_version(
 ) -> Result<String, BumpRecipeError> {
     // Create a JinjaConfig with default platform settings
     let jinja_config = JinjaConfig {
-        target_platform: Platform::current(),
-        host_platform: Platform::current(),
-        build_platform: Platform::current(),
+        platforms: PlatformTriple::native(),
         variant: BTreeMap::new(),
         experimental: false,
         recipe_path: None,

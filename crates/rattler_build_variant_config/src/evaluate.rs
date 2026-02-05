@@ -126,6 +126,7 @@ fn evaluate_value(
 mod tests {
     use super::*;
     use crate::yaml_parser::parse_variant_str;
+    use rattler_build_types::PlatformTriple;
     use rattler_conda_types::Platform;
 
     #[test]
@@ -159,7 +160,7 @@ vc:
 
         // Test with Linux platform (unix = true)
         let jinja_config = JinjaConfig {
-            target_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
         let config = evaluate_variant_config(&stage0, &jinja_config).unwrap();
@@ -182,7 +183,7 @@ vc:
 
         // Test with Windows platform (win = true)
         let jinja_config = JinjaConfig {
-            target_platform: Platform::Win64,
+            platforms: PlatformTriple::new(Platform::Win64, Platform::Win64, Platform::Win64),
             ..Default::default()
         };
         let config = evaluate_variant_config(&stage0, &jinja_config).unwrap();
@@ -201,7 +202,7 @@ target:
         let stage0 = parse_variant_str(yaml, None).unwrap();
 
         let jinja_config = JinjaConfig {
-            target_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
         let config = evaluate_variant_config(&stage0, &jinja_config).unwrap();
@@ -225,7 +226,7 @@ mixed:
         let stage0 = parse_variant_str(yaml, None).unwrap();
 
         let jinja_config = JinjaConfig {
-            target_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
         let config = evaluate_variant_config(&stage0, &jinja_config).unwrap();
@@ -249,7 +250,7 @@ python:
         let stage0 = parse_variant_str(yaml, None).unwrap();
 
         let jinja_config = JinjaConfig {
-            target_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
         let config = evaluate_variant_config(&stage0, &jinja_config).unwrap();

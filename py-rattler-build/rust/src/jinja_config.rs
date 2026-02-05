@@ -9,6 +9,7 @@ use crate::error::RattlerBuildError;
 use pyo3::prelude::*;
 
 use rattler_build_jinja::{JinjaConfig, NormalizedKey, UndefinedBehavior, Variable};
+use rattler_build_types::PlatformTriple;
 use rattler_conda_types::Platform;
 
 /// Python wrapper for JinjaConfig
@@ -115,9 +116,7 @@ impl PyJinjaConfig {
         };
 
         let jinja_config = JinjaConfig {
-            target_platform,
-            host_platform,
-            build_platform,
+            platforms: PlatformTriple::new(build_platform, host_platform, target_platform),
             variant: variant_map,
             experimental: experimental.unwrap_or(false),
             recipe_path,
@@ -131,17 +130,17 @@ impl PyJinjaConfig {
 
     #[getter]
     fn target_platform(&self) -> String {
-        self.inner.target_platform.to_string()
+        self.inner.platforms.target.to_string()
     }
 
     #[getter]
     fn host_platform(&self) -> String {
-        self.inner.host_platform.to_string()
+        self.inner.platforms.host.to_string()
     }
 
     #[getter]
     fn build_platform(&self) -> String {
-        self.inner.build_platform.to_string()
+        self.inner.platforms.build.to_string()
     }
 
     #[getter]

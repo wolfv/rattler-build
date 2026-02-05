@@ -4,11 +4,12 @@ use std::path::PathBuf;
 use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use rattler_build_jinja::Variable;
+use rattler_build_jinja::{JinjaConfig, Variable};
 use rattler_build_recipe::variant_render::{
     RenderConfig as RustRenderConfig, RenderedVariant as RustRenderedVariant,
     render_recipe_with_variant_config,
 };
+use rattler_build_types::PlatformTriple;
 use rattler_conda_types::Platform;
 
 use crate::error::RattlerBuildError;
@@ -76,12 +77,13 @@ impl PyRenderConfig {
 
         Ok(Self {
             inner: RustRenderConfig {
+                jinja: JinjaConfig {
+                    platforms: PlatformTriple::new(build_platform, host_platform, target_platform),
+                    experimental,
+                    recipe_path,
+                    ..Default::default()
+                },
                 extra_context,
-                experimental,
-                recipe_path,
-                target_platform,
-                build_platform,
-                host_platform,
                 os_env_var_keys,
             },
         })
@@ -107,36 +109,36 @@ impl PyRenderConfig {
 
     /// Get the target platform as a string
     fn target_platform(&self) -> String {
-        self.inner.target_platform.to_string()
+        self.inner.jinja.platforms.target.to_string()
     }
 
     /// Get the build platform as a string
     fn build_platform(&self) -> String {
-        self.inner.build_platform.to_string()
+        self.inner.jinja.platforms.build.to_string()
     }
 
     /// Get the host platform as a string
     fn host_platform(&self) -> String {
-        self.inner.host_platform.to_string()
+        self.inner.jinja.platforms.host.to_string()
     }
 
     /// Get whether experimental features are enabled
     fn experimental(&self) -> bool {
-        self.inner.experimental
+        self.inner.jinja.experimental
     }
 
     /// Get the recipe path
     fn recipe_path(&self) -> Option<PathBuf> {
-        self.inner.recipe_path.clone()
+        self.inner.jinja.recipe_path.clone()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "RenderConfig(target_platform='{}', build_platform='{}', host_platform='{}', experimental={})",
-            self.inner.target_platform,
-            self.inner.build_platform,
-            self.inner.host_platform,
-            self.inner.experimental
+            self.inner.jinja.platforms.target,
+            self.inner.jinja.platforms.build,
+            self.inner.jinja.platforms.host,
+            self.inner.jinja.experimental
         )
     }
 }

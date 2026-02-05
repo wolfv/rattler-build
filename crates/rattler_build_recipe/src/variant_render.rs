@@ -44,19 +44,14 @@ pub struct PinSubpackageInfo {
 /// Configuration for rendering recipes with variants
 #[derive(Debug, Clone)]
 pub struct RenderConfig {
+    /// Base Jinja configuration containing platform triple, experimental flag,
+    /// recipe path, and undefined behavior settings.
+    /// Note: the `variant` field in this config should typically be empty - actual
+    /// variants are provided per-combination during rendering.
+    pub jinja: JinjaConfig,
     /// Additional context variables to provide (beyond variant values)
     /// These can be strings, booleans, numbers, etc. using the Variable type
     pub extra_context: IndexMap<String, Variable>,
-    /// Whether experimental features are enabled
-    pub experimental: bool,
-    /// Path to the recipe file (for relative path resolution in Jinja functions)
-    pub recipe_path: Option<PathBuf>,
-    /// Target platform for the build
-    pub target_platform: rattler_conda_types::Platform,
-    /// Build platform (where the build runs)
-    pub build_platform: rattler_conda_types::Platform,
-    /// Host platform (for cross-compilation)
-    pub host_platform: rattler_conda_types::Platform,
     /// OS environment variable keys that can be overridden by variant configuration.
     /// These are typically derived from `env_vars::os_vars()` and include variables
     /// like `MACOSX_DEPLOYMENT_TARGET` on macOS that have default values but can be
@@ -67,12 +62,8 @@ pub struct RenderConfig {
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
+            jinja: JinjaConfig::default(),
             extra_context: IndexMap::new(),
-            experimental: false,
-            recipe_path: None,
-            target_platform: rattler_conda_types::Platform::current(),
-            build_platform: rattler_conda_types::Platform::current(),
-            host_platform: rattler_conda_types::Platform::current(),
             os_env_var_keys: HashSet::new(),
         }
     }
@@ -84,6 +75,12 @@ impl RenderConfig {
         Self::default()
     }
 
+    /// Set the base Jinja configuration
+    pub fn with_jinja_config(mut self, jinja: JinjaConfig) -> Self {
+        self.jinja = jinja;
+        self
+    }
+
     /// Add an extra context variable
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<Variable>) -> Self {
         self.extra_context.insert(key.into(), value.into());
@@ -92,31 +89,31 @@ impl RenderConfig {
 
     /// Enable experimental features
     pub fn with_experimental(mut self, experimental: bool) -> Self {
-        self.experimental = experimental;
+        self.jinja.experimental = experimental;
         self
     }
 
     /// Set the recipe path for relative path resolution
     pub fn with_recipe_path(mut self, recipe_path: impl Into<PathBuf>) -> Self {
-        self.recipe_path = Some(recipe_path.into());
+        self.jinja.recipe_path = Some(recipe_path.into());
         self
     }
 
     /// Set the target platform
     pub fn with_target_platform(mut self, platform: rattler_conda_types::Platform) -> Self {
-        self.target_platform = platform;
+        self.jinja.platforms.target = platform;
         self
     }
 
     /// Set the build platform
     pub fn with_build_platform(mut self, platform: rattler_conda_types::Platform) -> Self {
-        self.build_platform = platform;
+        self.jinja.platforms.build = platform;
         self
     }
 
     /// Set the host platform
     pub fn with_host_platform(mut self, platform: rattler_conda_types::Platform) -> Self {
-        self.host_platform = platform;
+        self.jinja.platforms.host = platform;
         self
     }
 
@@ -842,37 +839,40 @@ fn create_jinja_config(
     config: &RenderConfig,
     variant: &BTreeMap<NormalizedKey, Variable>,
 ) -> JinjaConfig {
+    // Start with a clone of the base jinja config
+    let mut jinja = config.jinja.clone();
+
     // Check if the variant specifies a target_platform - if so, use it
     // This allows rendering recipes for platforms different from the current platform
     // (e.g., rendering a Windows variant on Linux to check if outputs would be skipped)
     let target_platform = variant
         .get(&"target_platform".into())
         .and_then(|v| v.to_string().parse::<rattler_conda_types::Platform>().ok())
-        .unwrap_or(config.target_platform);
+        .unwrap_or(config.jinja.platforms.target);
 
     // Similarly for host_platform (defaults to target_platform if not specified)
     let host_platform = variant
         .get(&"host_platform".into())
         .and_then(|v| v.to_string().parse::<rattler_conda_types::Platform>().ok())
         .unwrap_or_else(|| {
-            // If host_platform not in variant, use config.host_platform if it differs from default,
+            // If host_platform not in variant, use config.jinja.platforms.host if it differs from default,
             // otherwise use the (potentially variant-derived) target_platform
-            if config.host_platform != config.target_platform {
-                config.host_platform
+            if config.jinja.platforms.host != config.jinja.platforms.target {
+                config.jinja.platforms.host
             } else {
                 target_platform
             }
         });
 
-    JinjaConfig {
-        experimental: config.experimental,
-        recipe_path: config.recipe_path.clone(),
-        target_platform,
-        build_platform: config.build_platform,
-        host_platform,
-        variant: variant.clone(),
-        ..Default::default()
-    }
+    // Update platforms with potentially variant-derived values
+    jinja.platforms.target = target_platform;
+    jinja.platforms.host = host_platform;
+    // build platform stays as configured (not overridden by variant)
+
+    // Set the variant for this specific combination
+    jinja.variant = variant.clone();
+
+    jinja
 }
 
 /// Render a recipe with variant configuration files
@@ -925,8 +925,8 @@ pub fn render_recipe_with_variants(
     let mut config = config.unwrap_or_default();
 
     // Set the recipe path if not already set
-    if config.recipe_path.is_none() {
-        config.recipe_path = Some(recipe_path.to_path_buf());
+    if config.jinja.recipe_path.is_none() {
+        config.jinja.recipe_path = Some(recipe_path.to_path_buf());
     }
 
     // Read and parse the recipe
@@ -936,7 +936,7 @@ pub fn render_recipe_with_variants(
     let stage0_recipe = stage0::parse_recipe_or_multi_from_source(&yaml_content)?;
 
     // Load variant configuration
-    let variant_config = VariantConfig::from_files(variant_files, config.target_platform)
+    let variant_config = VariantConfig::from_files(variant_files, config.jinja.platforms.target)
         .map_err(|e| ParseError::from_message(e.to_string()))?;
 
     render_recipe_with_variant_config(&stage0_recipe, &variant_config, config)
@@ -990,7 +990,7 @@ fn render_multi_output_with_variants(
         .iter()
         .any(|o| matches!(o, stage0::Output::Staging(_)));
 
-    if has_staging && !config.experimental {
+    if has_staging && !config.jinja.experimental {
         return Err(ParseError::from_message(
             "staging outputs are an experimental feature: provide the `--experimental` flag to enable this feature",
         ));

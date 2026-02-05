@@ -298,10 +298,10 @@ pub fn get_tool_config(
         .with_error_prefix_in_binary(build_data.error_prefix_in_binary)
         .with_allow_symlinks_on_windows(build_data.allow_symlinks_on_windows)
         .with_allow_absolute_license_paths(build_data.allow_absolute_license_paths)
-        .with_zstd_repodata_enabled(build_data.common.use_zstd)
-        .with_bz2_repodata_enabled(build_data.common.use_bz2)
-        .with_sharded_repodata_enabled(build_data.common.use_sharded)
-        .with_jlap_enabled(build_data.common.use_jlap);
+        .with_zstd_repodata_enabled(build_data.common.repodata_settings.zstd_enabled)
+        .with_bz2_repodata_enabled(build_data.common.repodata_settings.bz2_enabled)
+        .with_sharded_repodata_enabled(build_data.common.repodata_settings.sharded_enabled)
+        .with_jlap_enabled(build_data.common.repodata_settings.jlap_enabled);
 
     let configuration_builder = if let Some(fancy_log_handler) = fancy_log_handler {
         configuration_builder.with_logging_output_handler(fancy_log_handler.clone())

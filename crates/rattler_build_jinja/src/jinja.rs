@@ -6,7 +6,7 @@ use minijinja::{
     syntax::SyntaxConfig,
     value::{Kwargs, Object},
 };
-use rattler_build_types::{NormalizedKey, Pin, PinArgs};
+use rattler_build_types::{NormalizedKey, Pin, PinArgs, PlatformTriple};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::{
@@ -25,12 +25,8 @@ pub use minijinja::UndefinedBehavior;
 /// Configuration for Jinja template rendering in rattler-build
 #[derive(Debug, Clone)]
 pub struct JinjaConfig {
-    /// The target platform for the build
-    pub target_platform: Platform,
-    /// The build platform (where the build is happening)
-    pub build_platform: Platform,
-    /// The host platform (where the package will run, defaults to target_platform if not set)
-    pub host_platform: Platform,
+    /// The platforms involved in the build (build, host, target)
+    pub platforms: PlatformTriple,
     /// Variant configuration (compiler versions, etc.)
     pub variant: BTreeMap<NormalizedKey, Variable>,
     /// Whether experimental features are enabled
@@ -43,11 +39,8 @@ pub struct JinjaConfig {
 
 impl Default for JinjaConfig {
     fn default() -> Self {
-        let current = Platform::current();
         Self {
-            target_platform: current,
-            build_platform: current,
-            host_platform: current,
+            platforms: PlatformTriple::native(),
             variant: BTreeMap::new(),
             experimental: false,
             recipe_path: None,
@@ -155,38 +148,38 @@ impl Jinja {
         // Add platform variables to context
         context.insert(
             "target_platform".to_string(),
-            Value::from(config.target_platform.to_string()),
+            Value::from(config.platforms.target.to_string()),
         );
         context.insert(
             "build_platform".to_string(),
-            Value::from(config.build_platform.to_string()),
+            Value::from(config.platforms.build.to_string()),
         );
         context.insert(
             "host_platform".to_string(),
-            Value::from(config.host_platform.to_string()),
+            Value::from(config.platforms.host.to_string()),
         );
 
         // Add common platform shortcuts
         context.insert(
             "unix".to_string(),
-            Value::from(config.target_platform.is_unix()),
+            Value::from(config.platforms.target.is_unix()),
         );
         context.insert(
             "linux".to_string(),
-            Value::from(config.target_platform.is_linux()),
+            Value::from(config.platforms.target.is_linux()),
         );
         context.insert(
             "osx".to_string(),
-            Value::from(config.target_platform.is_osx()),
+            Value::from(config.platforms.target.is_osx()),
         );
         context.insert(
             "win".to_string(),
-            Value::from(config.target_platform.is_windows()),
+            Value::from(config.platforms.target.is_windows()),
         );
 
         // Add architecture aliases (e.g., "x86_64", "aarch64", "ppc64le")
         // All known architectures are defined, with only the current target's architecture being true
-        let current_arch = config.target_platform.arch();
+        let current_arch = config.platforms.target.arch();
         for arch in Arch::iter() {
             context.insert(arch.to_string(), Value::from(current_arch == Some(arch)));
         }
@@ -200,7 +193,7 @@ impl Jinja {
                 continue;
             }
             let alias = platform.to_string().replace('-', "");
-            context.insert(alias, Value::from(platform == config.target_platform));
+            context.insert(alias, Value::from(platform == config.platforms.target));
         }
 
         // Add variant variables to context
@@ -630,14 +623,17 @@ fn set_jinja(
     accessed_variables: Arc<Mutex<HashSet<String>>>,
 ) -> minijinja::Environment<'static> {
     let JinjaConfig {
-        target_platform,
-        host_platform,
-        build_platform,
+        platforms,
         variant,
         experimental,
         recipe_path,
         undefined_behavior,
     } = config.clone();
+    let PlatformTriple {
+        target: target_platform,
+        host: host_platform,
+        build: build_platform,
+    } = platforms;
 
     let mut env = Environment::empty();
     env.set_undefined_behavior(undefined_behavior);
@@ -984,16 +980,12 @@ mod tests {
     #[cfg(not(all(any(target_arch = "aarch64", target_arch = "powerpc64"), target_os = "linux")))]
     fn eval_git() {
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             experimental: true,
             ..Default::default()
         };
         let options_wo_experimental = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
 
@@ -1015,9 +1007,7 @@ mod tests {
     #[rustfmt::skip]
     fn eval_load_from_file() {
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             experimental: true,
             ..Default::default()
         };
@@ -1062,9 +1052,7 @@ mod tests {
         fs::write(&json_path, "{ \"hello\": \"world\" }").unwrap();
 
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             experimental: true,
             recipe_path: Some(recipe_path),
             ..Default::default()
@@ -1093,9 +1081,7 @@ mod tests {
         fs::write(&json_path, "{ \"hello\": \"world\" }").unwrap();
 
         let options_wo_experimental = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             experimental: false,
             recipe_path: Some(recipe_path),
             ..Default::default()
@@ -1116,9 +1102,7 @@ mod tests {
     #[rustfmt::skip]
     fn eval() {
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
 
@@ -1141,9 +1125,7 @@ mod tests {
     #[rustfmt::skip]
     fn eval2() {
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
 
@@ -1156,9 +1138,7 @@ mod tests {
     fn eval_cdt_x86_64() {
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             variant,
             ..Default::default()
         };
@@ -1186,9 +1166,7 @@ mod tests {
     fn eval_cdt_x86() {
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            target_platform: Platform::Linux32,
-            host_platform: Platform::Linux32,
-            build_platform: Platform::Linux32,
+            platforms: PlatformTriple::new(Platform::Linux32, Platform::Linux32, Platform::Linux32),
             variant,
             ..Default::default()
         };
@@ -1216,9 +1194,7 @@ mod tests {
     fn eval_cdt_aarch64() {
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            target_platform: Platform::LinuxAarch64,
-            host_platform: Platform::LinuxAarch64,
-            build_platform: Platform::LinuxAarch64,
+            platforms: PlatformTriple::new(Platform::LinuxAarch64, Platform::LinuxAarch64, Platform::LinuxAarch64),
             variant,
             ..Default::default()
         };
@@ -1246,9 +1222,7 @@ mod tests {
     fn eval_cdt_arm6() {
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            target_platform: Platform::LinuxArmV6l,
-            host_platform: Platform::LinuxArmV6l,
-            build_platform: Platform::LinuxArmV6l,
+            platforms: PlatformTriple::new(Platform::LinuxArmV6l, Platform::LinuxArmV6l, Platform::LinuxArmV6l),
             variant,
             ..Default::default()
         };
@@ -1278,9 +1252,7 @@ mod tests {
         let variant = BTreeMap::from_iter(vec![("python".into(), "3.7".into())]);
 
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             variant,
             ..Default::default()
         };
@@ -1301,9 +1273,7 @@ mod tests {
         let variant = BTreeMap::from_iter(vec![("python".into(), "3.7.* *_cpython".into())]);
 
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             variant,
             ..Default::default()
         };
@@ -1340,9 +1310,7 @@ mod tests {
     #[test]
     fn eval_pin_subpackage() {
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
 
@@ -1412,9 +1380,7 @@ mod tests {
     #[test]
     fn eval_env() {
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
         let jinja = Jinja::new(options);
@@ -1560,9 +1526,7 @@ mod tests {
         // it tracks the variable access
         let variant = BTreeMap::from_iter(vec![("cdt_name".into(), "conda".into())]);
         let options = JinjaConfig {
-            target_platform: Platform::LinuxAarch64,
-            host_platform: Platform::LinuxAarch64,
-            build_platform: Platform::LinuxAarch64,
+            platforms: PlatformTriple::new(Platform::LinuxAarch64, Platform::LinuxAarch64, Platform::LinuxAarch64),
             variant,
             ..Default::default()
         };
@@ -1587,9 +1551,7 @@ mod tests {
         // it tracks the variable access
         let variant = BTreeMap::from_iter(vec![("cdt_arch".into(), "custom_arch".into())]);
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             variant,
             ..Default::default()
         };
@@ -1614,9 +1576,7 @@ mod tests {
         // it does NOT track the variable (since it wasn't actually read from the variant)
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            target_platform: Platform::LinuxAarch64,
-            host_platform: Platform::LinuxAarch64,
-            build_platform: Platform::LinuxAarch64,
+            platforms: PlatformTriple::new(Platform::LinuxAarch64, Platform::LinuxAarch64, Platform::LinuxAarch64),
             variant,
             ..Default::default()
         };
@@ -1646,9 +1606,7 @@ mod tests {
             ("go_cgo_compiler_version".into(), "1.24".into()),
         ]);
         let options = JinjaConfig {
-            target_platform: Platform::Linux64,
-            host_platform: Platform::Linux64,
-            build_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             variant,
             ..Default::default()
         };

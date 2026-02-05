@@ -79,7 +79,7 @@ impl VariantConfig {
     /// use std::path::Path;
     ///
     /// let mut jinja_config = JinjaConfig::default();
-    /// jinja_config.target_platform = Platform::Linux64;
+    /// jinja_config.platforms.target = Platform::Linux64;
     ///
     /// let config = VariantConfig::from_file_with_context(
     ///     Path::new("variants.yaml"),
@@ -152,7 +152,9 @@ impl VariantConfig {
         target_platform: rattler_conda_types::Platform,
     ) -> Result<Self, VariantConfigError> {
         let mut jinja_config = rattler_build_jinja::JinjaConfig::default();
-        jinja_config.target_platform = target_platform;
+        jinja_config.platforms.target = target_platform;
+        jinja_config.platforms.host = target_platform;
+        jinja_config.platforms.build = target_platform;
         Self::from_files_with_context(paths, &jinja_config)
     }
 

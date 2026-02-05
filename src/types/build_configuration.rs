@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use rattler_build_jinja::{JinjaConfig, Variable};
 use rattler_build_recipe::stage1::HashInfo;
-use rattler_build_types::NormalizedKey;
+use rattler_build_types::{NormalizedKey, PlatformTriple};
 use rattler_conda_types::{ChannelUrl, PackageName, Platform};
 use rattler_solve::{ChannelPriority, SolveStrategy};
 use serde::{Deserialize, Serialize};
@@ -81,9 +81,11 @@ impl BuildConfiguration {
     /// Construct a `JinjaConfig` from the given `BuildConfiguration`
     pub fn selector_config(&self) -> JinjaConfig {
         JinjaConfig {
-            target_platform: self.target_platform,
-            host_platform: self.host_platform.platform,
-            build_platform: self.build_platform.platform,
+            platforms: PlatformTriple::new(
+                self.build_platform.platform,
+                self.host_platform.platform,
+                self.target_platform,
+            ),
             variant: self.variant.clone(),
             experimental: false,
             undefined_behavior: rattler_build_jinja::UndefinedBehavior::Lenient,

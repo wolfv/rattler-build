@@ -25,7 +25,7 @@ use ::rattler_build::{
     console_utils::LoggingOutputHandler,
     opt::{CommonData, PackageSource, RebuildData},
     rebuild_package_core,
-    tool_configuration::TestStrategy,
+    tool_configuration::{RepodataSettings, TestStrategy},
 };
 use clap::ValueEnum;
 use rattler_config::config::ConfigBase;
@@ -362,10 +362,7 @@ impl PyPackage {
             config,
             None, // channel_priority
             allow_insecure_host,
-            use_bz2,
-            use_zstd,
-            use_jlap,
-            use_sharded,
+            RepodataSettings::new(use_zstd, use_bz2, use_sharded, use_jlap),
         );
 
         // Create rebuild data using the package path
@@ -519,10 +516,7 @@ impl PyPackage {
             config,
             channel_priority,
             allow_insecure_host,
-            use_bz2,
-            use_zstd,
-            use_jlap,
-            use_sharded,
+            RepodataSettings::new(use_zstd, use_bz2, use_sharded, use_jlap),
         );
 
         let channel = match channel {

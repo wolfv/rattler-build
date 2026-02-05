@@ -159,25 +159,25 @@ impl PyToolConfiguration {
     /// Whether to use zstd compression
     #[getter]
     fn use_zstd(&self) -> bool {
-        self.inner.use_zstd
+        self.inner.repodata_settings.zstd_enabled
     }
 
     /// Whether to use bzip2 compression
     #[getter]
     fn use_bz2(&self) -> bool {
-        self.inner.use_bz2
+        self.inner.repodata_settings.bz2_enabled
     }
 
     /// Whether to use sharded repodata
     #[getter]
     fn use_sharded(&self) -> bool {
-        self.inner.use_sharded
+        self.inner.repodata_settings.sharded_enabled
     }
 
     /// Whether to use JLAP
     #[getter]
     fn use_jlap(&self) -> bool {
-        self.inner.use_jlap
+        self.inner.repodata_settings.jlap_enabled
     }
 
     /// Compression threads

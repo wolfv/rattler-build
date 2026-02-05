@@ -278,10 +278,7 @@ pub struct CommonData {
     pub s3_config: HashMap<String, s3_middleware::S3Config>,
     pub mirror_config: HashMap<Url, Vec<mirror_middleware::Mirror>>,
     pub allow_insecure_host: Option<Vec<String>>,
-    pub use_zstd: bool,
-    pub use_bz2: bool,
-    pub use_sharded: bool,
-    pub use_jlap: bool,
+    pub repodata_settings: crate::tool_configuration::RepodataSettings,
 }
 
 impl CommonData {
@@ -294,10 +291,7 @@ impl CommonData {
         config: ConfigBase<()>,
         channel_priority: Option<ChannelPriority>,
         allow_insecure_host: Option<Vec<String>>,
-        use_zstd: bool,
-        use_bz2: bool,
-        use_sharded: bool,
-        use_jlap: bool,
+        repodata_settings: crate::tool_configuration::RepodataSettings,
     ) -> Self {
         // mirror config
         // todo: this is a duplicate in pixi and pixi-pack: do it like in `compute_s3_config`
@@ -341,10 +335,7 @@ impl CommonData {
             mirror_config,
             channel_priority: channel_priority.unwrap_or(ChannelPriority::Strict),
             allow_insecure_host,
-            use_zstd,
-            use_bz2,
-            use_sharded,
-            use_jlap,
+            repodata_settings,
         }
     }
 
@@ -356,10 +347,12 @@ impl CommonData {
             config,
             value.channel_priority.map(|c| c.value),
             value.allow_insecure_host,
-            value.use_zstd,
-            value.use_bz2,
-            value.use_sharded,
-            value.use_jlap,
+            crate::tool_configuration::RepodataSettings::new(
+                value.use_zstd,
+                value.use_bz2,
+                value.use_sharded,
+                value.use_jlap,
+            ),
         )
     }
 }

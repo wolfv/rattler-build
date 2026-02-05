@@ -3380,6 +3380,7 @@ impl Evaluate for crate::stage0::MultiOutputRecipe {
 mod tests {
     use minijinja::UndefinedBehavior;
     use rattler_build_jinja::{JinjaConfig, Variable};
+    use rattler_build_types::PlatformTriple;
 
     use super::*;
     use crate::stage0::types::{
@@ -3555,9 +3556,11 @@ mod tests {
         // Create JinjaConfig with the variant and target_platform
         let jinja_config = JinjaConfig {
             variant: variant.clone(),
-            target_platform: rattler_conda_types::Platform::Linux64,
-            build_platform: rattler_conda_types::Platform::Linux64,
-            host_platform: rattler_conda_types::Platform::Linux64,
+            platforms: PlatformTriple::new(
+                rattler_conda_types::Platform::Linux64,
+                rattler_conda_types::Platform::Linux64,
+                rattler_conda_types::Platform::Linux64,
+            ),
             ..Default::default()
         };
 
@@ -4861,9 +4864,11 @@ outputs:
             crate::stage0::Recipe::MultiOutput(multi) => {
                 // Test on Windows - the output should be skipped and not fail
                 let jinja_config = JinjaConfig {
-                    target_platform: rattler_conda_types::Platform::Win64,
-                    build_platform: rattler_conda_types::Platform::Win64,
-                    host_platform: rattler_conda_types::Platform::Win64,
+                    platforms: PlatformTriple::new(
+                        rattler_conda_types::Platform::Win64,
+                        rattler_conda_types::Platform::Win64,
+                        rattler_conda_types::Platform::Win64,
+                    ),
                     // Note: no c_stdlib in variant - stdlib('c') would fail on Windows
                     variant: std::collections::BTreeMap::new(),
                     ..Default::default()
@@ -4940,9 +4945,11 @@ outputs:
                 variant.insert("cxx_compiler_version".into(), Variable::from_string("12"));
 
                 let jinja_config = JinjaConfig {
-                    target_platform: rattler_conda_types::Platform::Linux64,
-                    build_platform: rattler_conda_types::Platform::Linux64,
-                    host_platform: rattler_conda_types::Platform::Linux64,
+                    platforms: PlatformTriple::new(
+                        rattler_conda_types::Platform::Linux64,
+                        rattler_conda_types::Platform::Linux64,
+                        rattler_conda_types::Platform::Linux64,
+                    ),
                     variant,
                     ..Default::default()
                 };

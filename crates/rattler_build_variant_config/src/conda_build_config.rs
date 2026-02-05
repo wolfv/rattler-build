@@ -50,7 +50,7 @@ fn conda_build_config_jinja(jinja_config: &JinjaConfig) -> Jinja {
     let mut jinja = Jinja::new(jinja_config.clone());
 
     // Add platform shorthands to jinja context
-    let short_target_platform = jinja_config.target_platform.to_string().replace("-", "");
+    let short_target_platform = jinja_config.platforms.target.to_string().replace("-", "");
     jinja
         .context_mut()
         .insert(short_target_platform, Value::from(true));
@@ -174,6 +174,7 @@ pub fn load_conda_build_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rattler_build_types::PlatformTriple;
     use rattler_conda_types::Platform;
     use rstest::rstest;
     use serial_test::serial;
@@ -207,7 +208,7 @@ mod tests {
     #[test]
     fn test_selector_context() {
         let config = JinjaConfig {
-            target_platform: Platform::Linux64,
+            platforms: PlatformTriple::new(Platform::Linux64, Platform::Linux64, Platform::Linux64),
             ..Default::default()
         };
         let jinja = conda_build_config_jinja(&config);
@@ -231,7 +232,7 @@ mod tests {
 
         // fix the platform for the snapshots
         let jinja_config = JinjaConfig {
-            target_platform: Platform::OsxArm64,
+            platforms: PlatformTriple::new(Platform::OsxArm64, Platform::OsxArm64, Platform::OsxArm64),
             ..Default::default()
         };
 

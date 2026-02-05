@@ -9,7 +9,7 @@ use ::rattler_build::{
     metadata::Debug,
     opt::{BuildData, ChannelPriorityWrapper, CommonData, TestData},
     run_test,
-    tool_configuration::{ContinueOnFailure, SkipExisting, TestStrategy},
+    tool_configuration::{ContinueOnFailure, RepodataSettings, SkipExisting, TestStrategy},
 };
 use clap::ValueEnum;
 use pyo3::prelude::*;
@@ -72,10 +72,7 @@ pub fn build_recipes_py(
         config,
         channel_priority,
         allow_insecure_host,
-        use_bz2,
-        use_zstd,
-        use_jlap,
-        use_sharded,
+        RepodataSettings::new(use_zstd, use_bz2, use_sharded, use_jlap),
     );
     let build_platform = build_platform
         .map(|p| Platform::from_str(&p))
@@ -182,10 +179,7 @@ pub fn test_package_py(
         config,
         channel_priority,
         allow_insecure_host,
-        use_bz2,
-        use_zstd,
-        use_jlap,
-        use_sharded,
+        RepodataSettings::new(use_zstd, use_bz2, use_sharded, use_jlap),
     );
     let channel = match channel {
         None => None,
