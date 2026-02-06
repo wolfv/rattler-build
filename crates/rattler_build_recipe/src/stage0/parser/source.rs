@@ -8,7 +8,7 @@ use crate::stage0::{
     types::{ConditionalList, IncludeExclude, Item, JinjaTemplate, NestedItemList, Value},
 };
 
-use rattler_build_yaml_parser::{parse_conditional_list, parse_value};
+use rattler_build_yaml_parser::{MappingParser, parse_conditional_list, parse_value};
 
 /// Parse a SHA256 hash value (can be concrete or template)
 fn parse_sha256_value(node: &Node) -> Result<Value<Sha256Hash>, ParseError> {
@@ -70,34 +70,15 @@ fn parse_md5_value(node: &Node) -> Result<Value<Md5Hash>, ParseError> {
 fn parse_source_filter(node: &Node) -> Result<IncludeExclude, ParseError> {
     // Try parsing as a mapping with include/exclude first
     if let Some(mapping) = node.as_mapping() {
-        let mut include = None;
-        let mut exclude = None;
+        let parser = MappingParser::new(mapping, "filter", &["include", "exclude"]);
 
-        for (key_node, value_node) in mapping.iter() {
-            let key = key_node.as_str();
+        let result = IncludeExclude::Mapping {
+            include: parser.optional_list("include")?,
+            exclude: parser.optional_list("exclude")?,
+        };
 
-            match key {
-                "include" => {
-                    include = Some(parse_conditional_list(value_node)?);
-                }
-                "exclude" => {
-                    exclude = Some(parse_conditional_list(value_node)?);
-                }
-                _ => {
-                    return Err(ParseError::invalid_value(
-                        "filter",
-                        format!("unknown field '{}' in filter mapping", key),
-                        *key_node.span(),
-                    )
-                    .with_suggestion("Valid fields are: include, exclude"));
-                }
-            }
-        }
-
-        return Ok(IncludeExclude::Mapping {
-            include: include.unwrap_or_default(),
-            exclude: exclude.unwrap_or_default(),
-        });
+        parser.finish()?;
+        return Ok(result);
     }
 
     // Otherwise parse as a simple list
@@ -262,66 +243,32 @@ fn parse_single_source(node: &Node) -> Result<Source, ParseError> {
 fn parse_git_source(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<GitSource, ParseError> {
-    use crate::stage0::types::ConditionalList;
+    let parser = MappingParser::new(
+        mapping,
+        "git source",
+        &[
+            "git",
+            "rev",
+            "tag",
+            "branch",
+            "depth",
+            "patches",
+            "target_directory",
+            "lfs",
+            "expected_commit",
+        ],
+    );
 
-    let mut url = None;
-    let mut rev = None;
-    let mut tag = None;
-    let mut branch = None;
-    let mut depth = None;
-    let mut patches = ConditionalList::default();
-    let mut target_directory = None;
-    let mut lfs = None;
-    let mut expected_commit = None;
+    let url = parser
+        .custom("git", |n| {
+            let url_value: Value<String> = parse_value(n)?;
+            Ok(GitUrl(url_value))
+        })?
+        .ok_or_else(|| ParseError::missing_field("git", *mapping.span()))?;
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-
-        match key {
-            "git" => {
-                let url_value: Value<String> = parse_value(value_node)?;
-                url = Some(GitUrl(url_value));
-            }
-            "rev" => {
-                rev = Some(GitRev::Value(parse_value(value_node)?));
-            }
-            "tag" => {
-                tag = Some(GitRev::Value(parse_value(value_node)?));
-            }
-            "branch" => {
-                branch = Some(GitRev::Value(parse_value(value_node)?));
-            }
-            "depth" => {
-                depth = Some(parse_value(value_node)?);
-            }
-            "patches" => {
-                patches = parse_conditional_list(value_node)?;
-            }
-            "target_directory" => {
-                target_directory = Some(parse_value(value_node)?);
-            }
-            "lfs" => {
-                lfs = Some(parse_value(value_node)?);
-            }
-            "expected_commit" => {
-                expected_commit = Some(parse_value(value_node)?);
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "git source",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion(
-                    "Valid fields are: git, rev, tag, branch, depth, patches, target_directory, lfs, expected_commit",
-                ));
-            }
-        }
-    }
-
-    let url = url.ok_or_else(|| {
-        ParseError::missing_field("git", get_span(&Node::Mapping(mapping.clone())))
-    })?;
+    let rev = parser.custom("rev", |n| Ok(GitRev::Value(parse_value(n)?)))?;
+    let tag = parser.custom("tag", |n| Ok(GitRev::Value(parse_value(n)?)))?;
+    let branch = parser.custom("branch", |n| Ok(GitRev::Value(parse_value(n)?)))?;
 
     // Check for conflicting rev/tag/branch
     let rev_count = [rev.is_some(), tag.is_some(), branch.is_some()]
@@ -332,173 +279,107 @@ fn parse_git_source(
         return Err(ParseError::invalid_value(
             "git source",
             "cannot specify more than one of: rev, tag, branch",
-            get_span(&Node::Mapping(mapping.clone())),
+            *mapping.span(),
         ));
     }
 
-    Ok(GitSource {
+    let result = GitSource {
         url,
         rev,
         tag,
         branch,
-        depth,
-        patches,
-        target_directory,
-        lfs,
-        expected_commit,
-    })
+        depth: parser.optional("depth")?,
+        patches: parser.optional_list("patches")?,
+        target_directory: parser.optional("target_directory")?,
+        lfs: parser.optional("lfs")?,
+        expected_commit: parser.optional("expected_commit")?,
+    };
+
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_url_source(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<UrlSource, ParseError> {
-    use crate::stage0::types::ConditionalList;
+    let parser = MappingParser::new(
+        mapping,
+        "url source",
+        &["url", "sha256", "md5", "file_name", "patches", "target_directory"],
+    );
 
-    let mut url = Vec::new();
-    let mut sha256 = None;
-    let mut md5 = None;
-    let mut file_name = None;
-    let mut patches = ConditionalList::default();
-    let mut target_directory = None;
-
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-
-        match key {
-            "url" => {
-                // URL can be a single value or a list
-                if let Some(seq) = value_node.as_sequence() {
-                    for item in seq.iter() {
-                        url.push(parse_value(item)?);
-                    }
-                } else {
-                    url.push(parse_value(value_node)?);
-                }
+    // URL can be a single value or a list
+    let url = parser.custom("url", |n| {
+        let mut urls = Vec::new();
+        if let Some(seq) = n.as_sequence() {
+            for item in seq.iter() {
+                urls.push(parse_value(item)?);
             }
-            "sha256" => {
-                sha256 = Some(parse_sha256_value(value_node)?);
-            }
-            "md5" => {
-                md5 = Some(parse_md5_value(value_node)?);
-            }
-            "file_name" => {
-                file_name = Some(parse_value(value_node)?);
-            }
-            "patches" => {
-                patches = parse_conditional_list(value_node)?;
-            }
-            "target_directory" => {
-                target_directory = Some(parse_value(value_node)?);
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "url source",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion(
-                    "Valid fields are: url, sha256, md5, file_name, patches, target_directory",
-                ));
-            }
+        } else {
+            urls.push(parse_value(n)?);
         }
-    }
+        Ok(urls)
+    })?.ok_or_else(|| ParseError::missing_field("url", *mapping.span()))?;
 
-    if url.is_empty() {
-        return Err(ParseError::missing_field(
-            "url",
-            get_span(&Node::Mapping(mapping.clone())),
-        ));
-    }
-
-    Ok(UrlSource {
+    let result = UrlSource {
         url,
-        sha256,
-        md5,
-        file_name,
-        patches,
-        target_directory,
-    })
+        sha256: parser.custom("sha256", parse_sha256_value)?,
+        md5: parser.custom("md5", parse_md5_value)?,
+        file_name: parser.optional("file_name")?,
+        patches: parser.optional_list("patches")?,
+        target_directory: parser.optional("target_directory")?,
+    };
+
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_path_source(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<PathSource, ParseError> {
-    use crate::stage0::types::ConditionalList;
+    let parser = MappingParser::new(
+        mapping,
+        "path source",
+        &[
+            "path",
+            "sha256",
+            "md5",
+            "patches",
+            "target_directory",
+            "file_name",
+            "use_gitignore",
+            "filter",
+        ],
+    );
 
-    let mut path = None;
-    let mut sha256 = None;
-    let mut md5 = None;
-    let mut patches = ConditionalList::default();
-    let mut target_directory = None;
-    let mut file_name = None;
-    let mut use_gitignore = true;
-    let mut filter = IncludeExclude::default();
+    let path = parser
+        .optional("path")?
+        .ok_or_else(|| ParseError::missing_field("path", *mapping.span()))?;
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    let use_gitignore = parser.custom("use_gitignore", |n| {
+        let scalar = n.as_scalar().ok_or_else(|| {
+            ParseError::expected_type("boolean", "non-scalar", get_span(n))
+        })?;
+        scalar.as_bool().ok_or_else(|| {
+            ParseError::invalid_value(
+                "use_gitignore",
+                format!("expected boolean, got '{}'", scalar.as_str()),
+                *n.span(),
+            )
+        })
+    })?.unwrap_or(true);
 
-        match key {
-            "path" => {
-                path = Some(parse_value(value_node)?);
-            }
-            "sha256" => {
-                sha256 = Some(parse_sha256_value(value_node)?);
-            }
-            "md5" => {
-                md5 = Some(parse_md5_value(value_node)?);
-            }
-            "patches" => {
-                patches = parse_conditional_list(value_node)?;
-            }
-            "target_directory" => {
-                target_directory = Some(parse_value(value_node)?);
-            }
-            "file_name" => {
-                file_name = Some(parse_value(value_node)?);
-            }
-            "use_gitignore" => {
-                let scalar = value_node.as_scalar().ok_or_else(|| {
-                    ParseError::expected_type("boolean", "non-scalar", get_span(value_node))
-                })?;
-                use_gitignore = match scalar.as_bool() {
-                    Some(b) => b,
-                    None => {
-                        return Err(ParseError::invalid_value(
-                            "use_gitignore",
-                            format!("expected boolean, got '{}'", scalar.as_str()),
-                            *value_node.span(),
-                        ));
-                    }
-                };
-            }
-            "filter" => {
-                filter = parse_source_filter(value_node)?;
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "path source",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion(
-                    "Valid fields are: path, sha256, md5, patches, target_directory, file_name, use_gitignore, filter",
-                ));
-            }
-        }
-    }
-
-    let path = path.ok_or_else(|| {
-        ParseError::missing_field("path", get_span(&Node::Mapping(mapping.clone())))
-    })?;
-
-    Ok(PathSource {
+    let result = PathSource {
         path,
-        sha256,
-        md5,
-        patches,
-        target_directory,
-        file_name,
+        sha256: parser.custom("sha256", parse_sha256_value)?,
+        md5: parser.custom("md5", parse_md5_value)?,
+        patches: parser.optional_list("patches")?,
+        target_directory: parser.optional("target_directory")?,
+        file_name: parser.optional("file_name")?,
         use_gitignore,
-        filter,
-    })
+        filter: parser.custom("filter", parse_source_filter)?.unwrap_or_default(),
+    };
+
+    parser.finish()?;
+    Ok(result)
 }

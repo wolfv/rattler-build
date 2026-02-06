@@ -371,6 +371,260 @@ impl ParseMapping for MarkedNode {
     }
 }
 
+use marked_yaml::types::MarkedMappingNode;
+
+/// A builder for parsing YAML mappings with automatic field validation.
+///
+/// This provides a more ergonomic API for parsing structs from YAML mappings,
+/// reducing boilerplate while maintaining good error messages with span information.
+///
+/// # Example
+///
+/// ```ignore
+/// let mapping = node.as_mapping()?;
+/// let parser = MappingParser::new(mapping, "my_struct", &["field1", "field2", "field3"]);
+///
+/// let result = MyStruct {
+///     field1: parser.optional("field1")?,
+///     field2: parser.optional_list("field2")?,
+///     field3: parser.custom("field3", |n| parse_special(n))?.unwrap_or_default(),
+/// };
+///
+/// parser.finish()?; // Validates no unknown fields
+/// ```
+pub struct MappingParser<'a> {
+    mapping: &'a MarkedMappingNode,
+    context: &'a str,
+    valid_fields: &'a [&'a str],
+}
+
+impl<'a> MappingParser<'a> {
+    /// Create a new MappingParser for the given mapping node.
+    ///
+    /// # Arguments
+    /// * `mapping` - The YAML mapping node to parse
+    /// * `context` - A name for this mapping (used in error messages, e.g., "build", "dynamic_linking")
+    /// * `valid_fields` - List of valid field names for validation
+    pub fn new(
+        mapping: &'a MarkedMappingNode,
+        context: &'a str,
+        valid_fields: &'a [&'a str],
+    ) -> Self {
+        Self {
+            mapping,
+            context,
+            valid_fields,
+        }
+    }
+
+    /// Get an optional field parsed with the default FromStr converter.
+    ///
+    /// Returns `Ok(None)` if the field doesn't exist.
+    pub fn optional<T>(&self, field: &str) -> ParseResult<Option<Value<T>>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        self.optional_with(field, &FromStrConverter::new())
+    }
+
+    /// Get an optional field parsed with a custom converter.
+    pub fn optional_with<T, C>(&self, field: &str, converter: &C) -> ParseResult<Option<Value<T>>>
+    where
+        C: NodeConverter<T>,
+    {
+        if let Some(node) = self.mapping.get(field) {
+            Ok(Some(parse_value_with_converter(node, field, converter)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get an optional conditional list field.
+    ///
+    /// Returns an empty list if the field doesn't exist.
+    pub fn optional_list<T>(&self, field: &str) -> ParseResult<ConditionalList<T>>
+    where
+        T: std::str::FromStr + ToString,
+        T::Err: std::fmt::Display,
+    {
+        self.optional_list_with(field, &FromStrConverter::new())
+    }
+
+    /// Get an optional conditional list field with a custom converter.
+    pub fn optional_list_with<T, C>(&self, field: &str, converter: &C) -> ParseResult<ConditionalList<T>>
+    where
+        C: NodeConverter<T>,
+    {
+        if let Some(node) = self.mapping.get(field) {
+            // Handle null/empty values
+            if let Some(scalar) = node.as_scalar() {
+                let s = scalar.as_str();
+                if s.is_empty() || s == "null" || s == "~" {
+                    return Ok(ConditionalList::default());
+                }
+            }
+            crate::conditional::parse_conditional_list_with_converter(node, converter)
+        } else {
+            Ok(ConditionalList::default())
+        }
+    }
+
+    /// Get a required field parsed with the default FromStr converter.
+    ///
+    /// Returns an error if the field doesn't exist.
+    pub fn required<T>(&self, field: &str) -> ParseResult<Value<T>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        self.required_with(field, &FromStrConverter::new())
+    }
+
+    /// Get a required field parsed with a custom converter.
+    pub fn required_with<T, C>(&self, field: &str, converter: &C) -> ParseResult<Value<T>>
+    where
+        C: NodeConverter<T>,
+    {
+        use crate::error::ParseError;
+
+        self.mapping
+            .get(field)
+            .ok_or_else(|| ParseError::missing_field(field, *self.mapping.span()))
+            .and_then(|node| parse_value_with_converter(node, field, converter))
+    }
+
+    /// Parse a field with a custom parser function.
+    ///
+    /// Returns `Ok(None)` if the field doesn't exist.
+    pub fn custom<T, F>(&self, field: &str, parser: F) -> ParseResult<Option<T>>
+    where
+        F: FnOnce(&MarkedNode) -> ParseResult<T>,
+    {
+        if let Some(node) = self.mapping.get(field) {
+            Ok(Some(parser(node)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Validate that no unknown fields exist in the mapping.
+    ///
+    /// Call this after extracting all fields to ensure the YAML doesn't contain
+    /// typos or invalid field names.
+    pub fn finish(&self) -> ParseResult<()> {
+        use crate::error::ParseError;
+
+        for (key, _) in self.mapping.iter() {
+            let key_str = key.as_str();
+            if !self.valid_fields.contains(&key_str) {
+                return Err(ParseError::invalid_value(
+                    self.context,
+                    format!("unknown field '{}'", key_str),
+                    *key.span(),
+                )
+                .with_suggestion(format!("valid fields are: {}", self.valid_fields.join(", "))));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get the underlying mapping node.
+    pub fn mapping(&self) -> &'a MarkedMappingNode {
+        self.mapping
+    }
+}
+
+impl ParseMapping for MarkedMappingNode {
+    fn try_get_field<T>(&self, field_name: &str) -> ParseResult<Option<Value<T>>>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
+        self.try_get_field_with(field_name, &FromStrConverter::new())
+    }
+
+    fn try_get_field_with<T, C>(
+        &self,
+        field_name: &str,
+        converter: &C,
+    ) -> ParseResult<Option<Value<T>>>
+    where
+        C: NodeConverter<T>,
+    {
+        if let Some(node) = self.get(field_name) {
+            Ok(Some(parse_value_with_converter(node, field_name, converter)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn try_get_list_or_item<T>(&self, field_name: &str) -> ParseResult<Option<ListOrItem<Value<T>>>>
+    where
+        T: std::str::FromStr + ToString,
+        T::Err: std::fmt::Display,
+    {
+        if let Some(node) = self.get(field_name) {
+            Ok(Some(node.parse_list_or_item(field_name)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn try_get_conditional_list<T>(
+        &self,
+        field_name: &str,
+    ) -> ParseResult<Option<ConditionalList<T>>>
+    where
+        T: std::str::FromStr + ToString,
+        T::Err: std::fmt::Display,
+    {
+        self.try_get_conditional_list_with(field_name, &FromStrConverter::new())
+    }
+
+    fn try_get_conditional_list_with<T, C>(
+        &self,
+        field_name: &str,
+        converter: &C,
+    ) -> ParseResult<Option<ConditionalList<T>>>
+    where
+        C: NodeConverter<T>,
+    {
+        if let Some(node) = self.get(field_name) {
+            // Handle null/empty values - in YAML, `field:` with no value or `field: null`
+            // becomes an empty scalar. We treat this as "not present" rather than an error.
+            if let Some(scalar) = node.as_scalar() {
+                let s = scalar.as_str();
+                if s.is_empty() || s == "null" || s == "~" {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(node.parse_conditional_list_with(converter)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn validate_keys(&self, section_name: &str, allowed: &[&str]) -> ParseResult<()> {
+        use crate::error::ParseError;
+
+        for (key, _) in self.iter() {
+            let key_str = key.as_str();
+            if !allowed.contains(&key_str) {
+                return Err(ParseError::invalid_value(
+                    section_name,
+                    format!("unknown field '{}'", key_str),
+                    *key.span(),
+                )
+                .with_suggestion(format!("valid fields are: {}", allowed.join(", "))));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,5 +732,123 @@ items:
 
         let list: ConditionalList<String> = node.parse_conditional_list().unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_mapping_parser_optional() {
+        let yaml = marked_yaml::parse_yaml(
+            0,
+            r#"
+config:
+  name: "test"
+  count: 42
+"#,
+        )
+        .unwrap();
+        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let parser = MappingParser::new(mapping, "config", &["name", "count", "optional"]);
+
+        let name: Option<Value<String>> = parser.optional("name").unwrap();
+        assert!(name.is_some());
+        assert_eq!(name.unwrap().as_concrete(), Some(&"test".to_string()));
+
+        let count: Option<Value<i32>> = parser.optional("count").unwrap();
+        assert!(count.is_some());
+        assert_eq!(count.unwrap().as_concrete(), Some(&42));
+
+        let optional: Option<Value<String>> = parser.optional("optional").unwrap();
+        assert!(optional.is_none());
+
+        parser.finish().unwrap();
+    }
+
+    #[test]
+    fn test_mapping_parser_optional_list() {
+        let yaml = marked_yaml::parse_yaml(
+            0,
+            r#"
+config:
+  items:
+    - one
+    - two
+    - three
+"#,
+        )
+        .unwrap();
+        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let parser = MappingParser::new(mapping, "config", &["items", "missing"]);
+
+        let items: ConditionalList<String> = parser.optional_list("items").unwrap();
+        assert_eq!(items.len(), 3);
+
+        let missing: ConditionalList<String> = parser.optional_list("missing").unwrap();
+        assert!(missing.is_empty());
+
+        parser.finish().unwrap();
+    }
+
+    #[test]
+    fn test_mapping_parser_required() {
+        let yaml = marked_yaml::parse_yaml(
+            0,
+            r#"
+config:
+  name: "test"
+"#,
+        )
+        .unwrap();
+        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let parser = MappingParser::new(mapping, "config", &["name", "count"]);
+
+        let name: Value<String> = parser.required("name").unwrap();
+        assert_eq!(name.as_concrete(), Some(&"test".to_string()));
+
+        // Required field that's missing should error
+        let result: ParseResult<Value<i32>> = parser.required("count");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_mapping_parser_finish_unknown_field() {
+        let yaml = marked_yaml::parse_yaml(
+            0,
+            r#"
+config:
+  name: "test"
+  unknown_field: "oops"
+"#,
+        )
+        .unwrap();
+        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let parser = MappingParser::new(mapping, "config", &["name"]);
+
+        // finish() should detect the unknown field
+        let result = parser.finish();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_mapping_parser_custom() {
+        let yaml = marked_yaml::parse_yaml(
+            0,
+            r#"
+config:
+  special: "custom_value"
+"#,
+        )
+        .unwrap();
+        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let parser = MappingParser::new(mapping, "config", &["special"]);
+
+        // Custom parser that uppercases the value
+        let result = parser.custom("special", |node| {
+            let s = node.as_scalar().unwrap().as_str();
+            Ok(s.to_uppercase())
+        }).unwrap();
+
+        assert_eq!(result, Some("CUSTOM_VALUE".to_string()));
+        parser.finish().unwrap();
     }
 }

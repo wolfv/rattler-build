@@ -1,24 +1,20 @@
 use marked_yaml::Node;
 use rattler_build_yaml_parser::{
-    parse_conditional_list, parse_conditional_list_or_item, parse_value,
+    MappingParser, parse_conditional_list, parse_conditional_list_or_item, parse_value,
 };
 
 use crate::{
     ParseError,
     stage0::{
-        Conditional, ConditionalList, ConditionalListOrItem, Item, JinjaExpression, NestedItemList,
-        Value,
+        Conditional, ConditionalList, Item, JinjaExpression, NestedItemList, Value,
         parser::helpers::get_span,
         tests::{
             CommandsTest, CommandsTestFiles, CommandsTestRequirements, DownstreamTest,
             PackageContentsCheckFiles, PackageContentsTest, PerlTest, PythonTest, PythonVersion,
             RTest, RubyTest, TestType,
         },
-        types::Script,
     },
 };
-
-use super::helpers::validate_mapping_fields;
 
 /// Parse tests section from YAML (expects a sequence)
 /// Returns a ConditionalList<TestType> which supports if/then/else conditionals
@@ -165,38 +161,22 @@ fn parse_single_test(node: &Node) -> Result<TestType, ParseError> {
 fn parse_python_test(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<PythonTest, ParseError> {
-    let mut imports = ConditionalListOrItem::default();
-    let mut pip_check = None;
-    let mut python_version = None;
+    let parser = MappingParser::new(
+        mapping,
+        "python test",
+        &["imports", "pip_check", "python_version"],
+    );
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "imports" => {
-                imports = parse_conditional_list_or_item(value_node)?;
-            }
-            "pip_check" => {
-                pip_check = Some(parse_value(value_node)?);
-            }
-            "python_version" => {
-                python_version = Some(parse_python_version(value_node)?);
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "python test",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: imports, pip_check, python_version"));
-            }
-        }
-    }
+    let result = PythonTest {
+        imports: parser
+            .custom("imports", parse_conditional_list_or_item)?
+            .unwrap_or_default(),
+        pip_check: parser.optional("pip_check")?,
+        python_version: parser.custom("python_version", parse_python_version)?,
+    };
 
-    Ok(PythonTest {
-        imports,
-        pip_check,
-        python_version,
-    })
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_python_version(node: &Node) -> Result<PythonVersion, ParseError> {
@@ -213,265 +193,136 @@ fn parse_python_version(node: &Node) -> Result<PythonVersion, ParseError> {
 fn parse_perl_test(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<PerlTest, ParseError> {
-    // Validate that all fields are known
-    validate_mapping_fields(mapping, "perl test", &["uses"])?;
-
-    let mut uses = ConditionalList::default();
-
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "uses" => {
-                uses = parse_conditional_list(value_node)?;
-            }
-            _ => unreachable!("Unknown field should have been caught by validation"),
-        }
-    }
-
-    Ok(PerlTest { uses })
+    let parser = MappingParser::new(mapping, "perl test", &["uses"]);
+    let result = PerlTest {
+        uses: parser.optional_list("uses")?,
+    };
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_r_test(mapping: &marked_yaml::types::MarkedMappingNode) -> Result<RTest, ParseError> {
-    // Validate that all fields are known
-    validate_mapping_fields(mapping, "r test", &["libraries"])?;
-
-    let mut libraries = ConditionalList::default();
-
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "libraries" => {
-                libraries = parse_conditional_list(value_node)?;
-            }
-            _ => unreachable!("Unknown field should have been caught by validation"),
-        }
-    }
-
-    Ok(RTest { libraries })
+    let parser = MappingParser::new(mapping, "r test", &["libraries"]);
+    let result = RTest {
+        libraries: parser.optional_list("libraries")?,
+    };
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_ruby_test(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<RubyTest, ParseError> {
-    // Validate that all fields are known
-    validate_mapping_fields(mapping, "ruby test", &["requires"])?;
-
-    let mut requires = ConditionalList::default();
-
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "requires" => {
-                requires = parse_conditional_list(value_node)?;
-            }
-            _ => unreachable!("Unknown field should have been caught by validation"),
-        }
-    }
-
-    Ok(RubyTest { requires })
+    let parser = MappingParser::new(mapping, "ruby test", &["requires"]);
+    let result = RubyTest {
+        requires: parser.optional_list("requires")?,
+    };
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_commands_test(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<CommandsTest, ParseError> {
-    let mut script = Script::default();
-    let mut requirements = None;
-    let mut files = None;
+    let parser = MappingParser::new(mapping, "commands test", &["script", "requirements", "files"]);
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "script" => {
-                // Use the same parse_script function from build parser
-                script = crate::stage0::parser::build::parse_script(value_node)?;
-            }
-            "requirements" => {
-                requirements = Some(parse_commands_test_requirements(
-                    value_node.as_mapping().ok_or_else(|| {
-                        ParseError::expected_type("mapping", "non-mapping", get_span(value_node))
-                    })?,
-                )?);
-            }
-            "files" => {
-                files = Some(parse_commands_test_files(
-                    value_node.as_mapping().ok_or_else(|| {
-                        ParseError::expected_type("mapping", "non-mapping", get_span(value_node))
-                    })?,
-                )?);
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "commands test",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: script, requirements, files"));
-            }
-        }
-    }
+    let result = CommandsTest {
+        script: parser
+            .custom("script", crate::stage0::parser::build::parse_script)?
+            .unwrap_or_default(),
+        requirements: parser.custom("requirements", |n| {
+            let m = n.as_mapping().ok_or_else(|| {
+                ParseError::expected_type("mapping", "non-mapping", get_span(n))
+            })?;
+            parse_commands_test_requirements(m)
+        })?,
+        files: parser.custom("files", |n| {
+            let m = n.as_mapping().ok_or_else(|| {
+                ParseError::expected_type("mapping", "non-mapping", get_span(n))
+            })?;
+            parse_commands_test_files(m)
+        })?,
+    };
 
-    Ok(CommandsTest {
-        script,
-        requirements,
-        files,
-    })
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_commands_test_requirements(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<CommandsTestRequirements, ParseError> {
-    let mut run = ConditionalList::default();
-    let mut build = ConditionalList::default();
+    let parser = MappingParser::new(mapping, "commands test requirements", &["run", "build"]);
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "run" => {
-                run = parse_conditional_list(value_node)?;
-            }
-            "build" => {
-                build = parse_conditional_list(value_node)?;
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "commands test requirements",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: run, build"));
-            }
-        }
-    }
+    let result = CommandsTestRequirements {
+        run: parser.optional_list("run")?,
+        build: parser.optional_list("build")?,
+    };
 
-    Ok(CommandsTestRequirements { run, build })
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_commands_test_files(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<CommandsTestFiles, ParseError> {
-    let mut source = ConditionalList::default();
-    let mut recipe = ConditionalList::default();
+    let parser = MappingParser::new(mapping, "commands test files", &["source", "recipe"]);
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "source" => {
-                source = parse_conditional_list(value_node)?;
-            }
-            "recipe" => {
-                recipe = parse_conditional_list(value_node)?;
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "commands test files",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: source, recipe"));
-            }
-        }
-    }
+    let result = CommandsTestFiles {
+        source: parser.optional_list("source")?,
+        recipe: parser.optional_list("recipe")?,
+    };
 
-    Ok(CommandsTestFiles { source, recipe })
+    parser.finish()?;
+    Ok(result)
 }
 
 fn parse_downstream_test(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<DownstreamTest, ParseError> {
-    let mut downstream = None;
+    let parser = MappingParser::new(mapping, "downstream test", &["downstream"]);
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "downstream" => {
-                downstream = Some(parse_value(value_node)?);
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "downstream test",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: downstream"));
-            }
-        }
-    }
+    let downstream = parser.required("downstream")?;
 
-    let downstream = downstream.ok_or_else(|| {
-        ParseError::missing_field("downstream", get_span(&Node::Mapping(mapping.clone())))
-    })?;
-
+    parser.finish()?;
     Ok(DownstreamTest { downstream })
 }
 
 fn parse_package_contents_test(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<PackageContentsTest, ParseError> {
-    let mut files = None;
-    let mut site_packages = None;
-    let mut bin = None;
-    let mut lib = None;
-    let mut include = None;
-    let mut strict = false;
+    let parser = MappingParser::new(
+        mapping,
+        "package_contents test",
+        &["files", "site_packages", "bin", "lib", "include", "strict"],
+    );
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "files" => {
-                files = Some(parse_package_contents_check_files_flexible(value_node)?);
+    let result = PackageContentsTest {
+        files: parser.custom("files", parse_package_contents_check_files_flexible)?,
+        site_packages: parser.custom("site_packages", parse_package_contents_check_files_flexible)?,
+        bin: parser.custom("bin", parse_package_contents_check_files_flexible)?,
+        lib: parser.custom("lib", parse_package_contents_check_files_flexible)?,
+        include: parser.custom("include", parse_package_contents_check_files_flexible)?,
+        strict: parser.custom("strict", |n| {
+            let scalar = n.as_scalar().ok_or_else(|| {
+                ParseError::expected_type("scalar", "non-scalar", get_span(n))
+                    .with_message("Expected 'strict' to be a boolean")
+            })?;
+            let s = scalar.as_str();
+            let span = *scalar.span();
+            match s {
+                "true" | "True" | "yes" | "Yes" => Ok(true),
+                "false" | "False" | "no" | "No" => Ok(false),
+                _ => Err(ParseError::invalid_value(
+                    "strict",
+                    format!("not a valid boolean value (found '{}')", s),
+                    span,
+                )),
             }
-            "site_packages" => {
-                site_packages = Some(parse_package_contents_check_files_flexible(value_node)?);
-            }
-            "bin" => {
-                bin = Some(parse_package_contents_check_files_flexible(value_node)?);
-            }
-            "lib" => {
-                lib = Some(parse_package_contents_check_files_flexible(value_node)?);
-            }
-            "include" => {
-                include = Some(parse_package_contents_check_files_flexible(value_node)?);
-            }
-            "strict" => {
-                let scalar = value_node.as_scalar().ok_or_else(|| {
-                    ParseError::expected_type("scalar", "non-scalar", get_span(value_node))
-                        .with_message("Expected 'strict' to be a boolean")
-                })?;
-                let s = scalar.as_str();
-                let span = *scalar.span();
-                strict = match s {
-                    "true" | "True" | "yes" | "Yes" => true,
-                    "false" | "False" | "no" | "No" => false,
-                    _ => {
-                        return Err(ParseError::invalid_value(
-                            "strict",
-                            format!("not a valid boolean value (found '{}')", s),
-                            span,
-                        ));
-                    }
-                };
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "package_contents test",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion(
-                    "Valid fields are: files, site_packages, bin, lib, include, strict",
-                ));
-            }
-        }
-    }
+        })?.unwrap_or(false),
+    };
 
-    Ok(PackageContentsTest {
-        files,
-        site_packages,
-        bin,
-        lib,
-        include,
-        strict,
-    })
+    parser.finish()?;
+    Ok(result)
 }
 
 /// Parse package contents check files with flexible format support
@@ -508,28 +359,13 @@ fn parse_package_contents_check_files_flexible(
 fn parse_package_contents_check_files(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<PackageContentsCheckFiles, ParseError> {
-    let mut exists = ConditionalList::default();
-    let mut not_exists = ConditionalList::default();
+    let parser = MappingParser::new(mapping, "package_contents check files", &["exists", "not_exists"]);
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
-        match key {
-            "exists" => {
-                exists = parse_conditional_list(value_node)?;
-            }
-            "not_exists" => {
-                not_exists = parse_conditional_list(value_node)?;
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "package_contents check files",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: exists, not_exists"));
-            }
-        }
-    }
+    let result = PackageContentsCheckFiles {
+        exists: parser.optional_list("exists")?,
+        not_exists: parser.optional_list("not_exists")?,
+    };
 
-    Ok(PackageContentsCheckFiles { exists, not_exists })
+    parser.finish()?;
+    Ok(result)
 }

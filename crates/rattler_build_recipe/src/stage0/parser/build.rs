@@ -12,8 +12,8 @@ use crate::stage0::{
     types::{IncludeExclude, Value},
 };
 use rattler_build_yaml_parser::{
-    helpers::contains_jinja_template, parse_conditional_list, parse_conditional_list_or_item,
-    parse_value_with_name,
+    MappingParser, helpers::contains_jinja_template, parse_conditional_list,
+    parse_conditional_list_or_item, parse_value_with_name,
 };
 
 /// Macro to parse a value with automatic field name inference for better error messages
@@ -403,65 +403,59 @@ pub fn parse_build(node: &Node) -> Result<Build, ParseError> {
 }
 
 fn parse_build_from_mapping(mapping: &MarkedMappingNode) -> Result<Build, ParseError> {
-    let mut build = Build::default();
+    let parser = MappingParser::new(
+        mapping,
+        "build",
+        &[
+            "number",
+            "string",
+            "script",
+            "noarch",
+            "python",
+            "skip",
+            "always_copy_files",
+            "always_include_files",
+            "merge_build_and_host_envs",
+            "files",
+            "dynamic_linking",
+            "variant",
+            "prefix_detection",
+            "post_process",
+        ],
+    );
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    let build = Build {
+        number: parser.optional("number")?,
+        string: parser.optional("string")?,
+        script: parser.custom("script", parse_script)?.unwrap_or_default(),
+        noarch: parser.custom("noarch", parse_noarch)?,
+        python: parser.custom("python", parse_python_build)?.unwrap_or_default(),
+        skip: parser
+            .custom("skip", |n| Ok(parse_conditional_list_or_item(n)?.into()))?
+            .unwrap_or_default(),
+        always_copy_files: parser.optional_list("always_copy_files")?,
+        always_include_files: parser.optional_list("always_include_files")?,
+        merge_build_and_host_envs: parser
+            .custom("merge_build_and_host_envs", |n| {
+                parse_bool_value(n, "merge_build_and_host_envs")
+            })?
+            .unwrap_or_default(),
+        files: parser.custom("files", parse_build_files)?.unwrap_or_default(),
+        dynamic_linking: parser
+            .custom("dynamic_linking", parse_dynamic_linking)?
+            .unwrap_or_default(),
+        variant: parser
+            .custom("variant", parse_variant_key_usage)?
+            .unwrap_or_default(),
+        prefix_detection: parser
+            .custom("prefix_detection", parse_prefix_detection)?
+            .unwrap_or_default(),
+        post_process: parser
+            .custom("post_process", parse_post_process_list)?
+            .unwrap_or_default(),
+    };
 
-        match key {
-            "number" => {
-                build.number = Some(parse_field!("build.number", value_node));
-            }
-            "string" => {
-                build.string = Some(parse_field!("build.string", value_node));
-            }
-            "script" => {
-                build.script = parse_script(value_node)?;
-            }
-            "noarch" => {
-                build.noarch = Some(parse_noarch(value_node)?);
-            }
-            "python" => {
-                build.python = parse_python_build(value_node)?;
-            }
-            "skip" => {
-                // Skip accepts both a single value (e.g., "win") or a list
-                build.skip = parse_conditional_list_or_item(value_node)?.into();
-            }
-            "always_copy_files" => {
-                build.always_copy_files = parse_conditional_list(value_node)?;
-            }
-            "always_include_files" => {
-                build.always_include_files = parse_conditional_list(value_node)?;
-            }
-            "merge_build_and_host_envs" => {
-                build.merge_build_and_host_envs =
-                    parse_bool_value(value_node, "merge_build_and_host_envs")?;
-            }
-            "files" => {
-                build.files = parse_build_files(value_node)?;
-            }
-            "dynamic_linking" => {
-                build.dynamic_linking = parse_dynamic_linking(value_node)?;
-            }
-            "variant" => {
-                build.variant = parse_variant_key_usage(value_node)?;
-            }
-            "prefix_detection" => {
-                build.prefix_detection = parse_prefix_detection(value_node)?;
-            }
-            "post_process" => {
-                build.post_process = parse_post_process_list(value_node)?;
-            }
-            _ => {
-                return Err(
-                    ParseError::invalid_value("build", format!("unknown field '{}'", key), *key_node.span())
-                        .with_suggestion("Valid fields are: number, string, script, noarch, python, skip, always_copy_files, always_include_files, merge_build_and_host_envs, files, dynamic_linking, variant, prefix_detection, post_process")
-                );
-            }
-        }
-    }
-
+    parser.finish()?;
     Ok(build)
 }
 
@@ -480,45 +474,31 @@ fn parse_dynamic_linking(node: &Node) -> Result<DynamicLinking, ParseError> {
             .with_message("Expected 'dynamic_linking' to be a mapping")
     })?;
 
-    let mut dynamic_linking = DynamicLinking::default();
+    let parser = MappingParser::new(
+        mapping,
+        "dynamic_linking",
+        &[
+            "rpaths",
+            "binary_relocation",
+            "missing_dso_allowlist",
+            "rpath_allowlist",
+            "overdepending_behavior",
+            "overlinking_behavior",
+        ],
+    );
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    let dynamic_linking = DynamicLinking {
+        rpaths: parser.optional_list("rpaths")?,
+        binary_relocation: parser
+            .custom("binary_relocation", parse_binary_relocation)?
+            .unwrap_or_default(),
+        missing_dso_allowlist: parser.optional_list("missing_dso_allowlist")?,
+        rpath_allowlist: parser.optional_list("rpath_allowlist")?,
+        overdepending_behavior: parser.optional("overdepending_behavior")?,
+        overlinking_behavior: parser.optional("overlinking_behavior")?,
+    };
 
-        match key {
-            "rpaths" => {
-                dynamic_linking.rpaths = parse_conditional_list(value_node)?;
-            }
-            "binary_relocation" => {
-                dynamic_linking.binary_relocation = parse_binary_relocation(value_node)?;
-            }
-            "missing_dso_allowlist" => {
-                dynamic_linking.missing_dso_allowlist = parse_conditional_list(value_node)?;
-            }
-            "rpath_allowlist" => {
-                dynamic_linking.rpath_allowlist = parse_conditional_list(value_node)?;
-            }
-            "overdepending_behavior" => {
-                dynamic_linking.overdepending_behavior = Some(parse_field!(
-                    "dynamic_linking.overdepending_behavior",
-                    value_node
-                ));
-            }
-            "overlinking_behavior" => {
-                dynamic_linking.overlinking_behavior = Some(parse_field!(
-                    "dynamic_linking.overlinking_behavior",
-                    value_node
-                ));
-            }
-            _ => {
-                return Err(
-                    ParseError::invalid_value("dynamic_linking", format!("unknown field '{}'", key), *key_node.span())
-                        .with_suggestion("Valid fields are: rpaths, binary_relocation, missing_dso_allowlist, rpath_allowlist, overdepending_behavior, overlinking_behavior")
-                );
-            }
-        }
-    }
-
+    parser.finish()?;
     Ok(dynamic_linking)
 }
 
@@ -528,39 +508,31 @@ fn parse_python_build(node: &Node) -> Result<PythonBuild, ParseError> {
             .with_message("Expected 'python' to be a mapping")
     })?;
 
-    let mut python = PythonBuild::default();
+    let parser = MappingParser::new(
+        mapping,
+        "python",
+        &[
+            "entry_points",
+            "skip_pyc_compilation",
+            "use_python_app_entrypoint",
+            "version_independent",
+            "site_packages_path",
+        ],
+    );
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    let python = PythonBuild {
+        entry_points: parser.optional_list("entry_points")?,
+        skip_pyc_compilation: parser.optional_list("skip_pyc_compilation")?,
+        use_python_app_entrypoint: parser
+            .custom("use_python_app_entrypoint", |n| {
+                parse_bool_value(n, "use_python_app_entrypoint")
+            })?
+            .unwrap_or_default(),
+        version_independent: parser.optional("version_independent")?,
+        site_packages_path: parser.optional("site_packages_path")?,
+    };
 
-        match key {
-            "entry_points" => {
-                python.entry_points = parse_conditional_list(value_node)?;
-            }
-            "skip_pyc_compilation" => {
-                python.skip_pyc_compilation = parse_conditional_list(value_node)?;
-            }
-            "use_python_app_entrypoint" => {
-                python.use_python_app_entrypoint =
-                    parse_bool_value(value_node, "use_python_app_entrypoint")?;
-            }
-            "version_independent" => {
-                python.version_independent =
-                    Some(parse_field!("python.version_independent", value_node));
-            }
-            "site_packages_path" => {
-                python.site_packages_path =
-                    Some(parse_field!("python.site_packages_path", value_node));
-            }
-            _ => {
-                return Err(
-                    ParseError::invalid_value("python", format!("unknown field '{}'", key), *key_node.span())
-                        .with_suggestion("Valid fields are: entry_points, skip_pyc_compilation, use_python_app_entrypoint, version_independent, site_packages_path")
-                );
-            }
-        }
-    }
-
+    parser.finish()?;
     Ok(python)
 }
 
@@ -570,35 +542,19 @@ fn parse_variant_key_usage(node: &Node) -> Result<VariantKeyUsage, ParseError> {
             .with_message("Expected 'variant' to be a mapping")
     })?;
 
-    let mut variant = VariantKeyUsage::default();
+    let parser = MappingParser::new(
+        mapping,
+        "variant",
+        &["use_keys", "ignore_keys", "down_prioritize_variant"],
+    );
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    let variant = VariantKeyUsage {
+        use_keys: parser.optional_list("use_keys")?,
+        ignore_keys: parser.optional_list("ignore_keys")?,
+        down_prioritize_variant: parser.optional("down_prioritize_variant")?,
+    };
 
-        match key {
-            "use_keys" => {
-                variant.use_keys = parse_conditional_list(value_node)?;
-            }
-            "ignore_keys" => {
-                variant.ignore_keys = parse_conditional_list(value_node)?;
-            }
-            "down_prioritize_variant" => {
-                variant.down_prioritize_variant =
-                    Some(parse_field!("variant.down_prioritize_variant", value_node));
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "variant",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion(
-                    "Valid fields are: use_keys, ignore_keys, down_prioritize_variant",
-                ));
-            }
-        }
-    }
-
+    parser.finish()?;
     Ok(variant)
 }
 
@@ -608,29 +564,14 @@ fn parse_force_file_type(node: &Node) -> Result<ForceFileType, ParseError> {
             .with_message("Expected 'force_file_type' to be a mapping")
     })?;
 
-    let mut force_file_type = ForceFileType::default();
+    let parser = MappingParser::new(mapping, "force_file_type", &["text", "binary"]);
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    let force_file_type = ForceFileType {
+        text: parser.optional_list("text")?,
+        binary: parser.optional_list("binary")?,
+    };
 
-        match key {
-            "text" => {
-                force_file_type.text = parse_conditional_list(value_node)?;
-            }
-            "binary" => {
-                force_file_type.binary = parse_conditional_list(value_node)?;
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "force_file_type",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: text, binary"));
-            }
-        }
-    }
-
+    parser.finish()?;
     Ok(force_file_type)
 }
 
@@ -649,35 +590,25 @@ fn parse_prefix_detection(node: &Node) -> Result<PrefixDetection, ParseError> {
             .with_message("Expected 'prefix_detection' to be a mapping")
     })?;
 
-    let mut prefix_detection = PrefixDetection::default();
+    let parser = MappingParser::new(
+        mapping,
+        "prefix_detection",
+        &["force_file_type", "ignore", "ignore_binary_files"],
+    );
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    let prefix_detection = PrefixDetection {
+        force_file_type: parser
+            .custom("force_file_type", parse_force_file_type)?
+            .unwrap_or_default(),
+        ignore: parser
+            .custom("ignore", parse_prefix_ignore)?
+            .unwrap_or_default(),
+        ignore_binary_files: parser
+            .custom("ignore_binary_files", |n| parse_bool_value(n, "ignore_binary_files"))?
+            .unwrap_or_default(),
+    };
 
-        match key {
-            "force_file_type" => {
-                prefix_detection.force_file_type = parse_force_file_type(value_node)?;
-            }
-            "ignore" => {
-                prefix_detection.ignore = parse_prefix_ignore(value_node)?;
-            }
-            "ignore_binary_files" => {
-                prefix_detection.ignore_binary_files =
-                    parse_bool_value(value_node, "ignore_binary_files")?;
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "prefix_detection",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion(
-                    "Valid fields are: force_file_type, ignore, ignore_binary_files",
-                ));
-            }
-        }
-    }
-
+    parser.finish()?;
     Ok(prefix_detection)
 }
 
@@ -687,39 +618,16 @@ fn parse_post_process(node: &Node) -> Result<PostProcess, ParseError> {
             .with_message("Expected post-process item to be a mapping")
     })?;
 
-    let mut files = None;
-    let mut regex = None;
-    let mut replacement = None;
+    let parser = MappingParser::new(mapping, "post_process", &["files", "regex", "replacement"]);
 
-    for (key_node, value_node) in mapping.iter() {
-        let key = key_node.as_str();
+    // All fields are required for PostProcess
+    let files = parser
+        .custom("files", parse_conditional_list)?
+        .ok_or_else(|| ParseError::missing_field("files", *mapping.span()))?;
+    let regex = parser.required("regex")?;
+    let replacement = parser.required("replacement")?;
 
-        match key {
-            "files" => {
-                files = Some(parse_conditional_list(value_node)?);
-            }
-            "regex" => {
-                regex = Some(parse_field!("post_process.regex", value_node));
-            }
-            "replacement" => {
-                replacement = Some(parse_field!("post_process.replacement", value_node));
-            }
-            _ => {
-                return Err(ParseError::invalid_value(
-                    "post_process",
-                    format!("unknown field '{}'", key),
-                    *key_node.span(),
-                )
-                .with_suggestion("Valid fields are: files, regex, replacement"));
-            }
-        }
-    }
-
-    // Ensure all required fields are present
-    let files = files.ok_or_else(|| ParseError::missing_field("files", get_span(node)))?;
-    let regex = regex.ok_or_else(|| ParseError::missing_field("regex", get_span(node)))?;
-    let replacement =
-        replacement.ok_or_else(|| ParseError::missing_field("replacement", get_span(node)))?;
+    parser.finish()?;
 
     Ok(PostProcess {
         files,

@@ -60,7 +60,7 @@ pub use list::{
     parse_list_or_item, parse_list_or_item_with_converter, parse_nested_item_list,
     parse_nested_item_list_with_converter,
 };
-pub use node_ext::{ParseMapping, ParseNode};
+pub use node_ext::{MappingParser, ParseMapping, ParseNode};
 pub use types::{
     Conditional, ConditionalList, ConditionalListOrItem, Item, ListOrItem, NestedItemList, Value,
     ValueInner,
