@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
@@ -70,10 +69,11 @@ impl PyRenderConfig {
 
         // Get OS environment variable keys that can be overridden by variant config
         // We use an empty prefix path since we just need the keys, not the values
-        let os_env_var_keys = rattler_build::env_vars::os_vars(&std::path::PathBuf::new(), &host_platform)
-            .keys()
-            .cloned()
-            .collect();
+        let os_env_var_keys =
+            rattler_build::env_vars::os_vars(&std::path::PathBuf::new(), &host_platform)
+                .keys()
+                .cloned()
+                .collect();
 
         Ok(Self {
             inner: RustRenderConfig {

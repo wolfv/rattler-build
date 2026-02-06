@@ -376,11 +376,11 @@ fn stable_topological_sort(
                             .copied()
                     };
 
-                    if let Some(dep_idx) = matching_dep_idx {
-                        if !added[dep_idx] {
-                            can_add = false;
-                            break;
-                        }
+                    if let Some(dep_idx) = matching_dep_idx
+                        && !added[dep_idx]
+                    {
+                        can_add = false;
+                        break;
                     }
                 }
             }
@@ -493,24 +493,18 @@ fn discover_new_variant_keys_from_evaluation(
                     }
                     stage0::Output::Package(pkg) => {
                         // Evaluate skip conditions to determine if output should be skipped
-                        let skip_conditions = crate::stage0::evaluate::evaluate_skip_list(
+                        let is_skipped = crate::stage0::evaluate::evaluate_skip_list(
                             &pkg.build.skip,
                             &context_with_vars,
                         )
                         .unwrap_or_default();
-                        let is_skipped = crate::stage0::evaluate::is_skipped(
-                            &skip_conditions,
-                            &context_with_vars,
-                        );
                         (&pkg.requirements, is_skipped)
                     }
                 };
 
                 // Only evaluate requirements for non-skipped outputs
-                if !should_skip {
-                    if let Ok(evaluated) = reqs.evaluate(&context_with_vars) {
-                        all_free_specs.extend(evaluated.free_specs());
-                    }
+                if !should_skip && let Ok(evaluated) = reqs.evaluate(&context_with_vars) {
+                    all_free_specs.extend(evaluated.free_specs());
                 }
             }
             all_free_specs
@@ -2287,11 +2281,52 @@ build:
             rendered.len()
         );
 
-        // Verify the recipe has skip conditions set
+        // Verify the recipe has skip evaluated to true
         let recipe = &rendered[0].recipe;
         assert!(
-            recipe.build.skip.contains(&"true".to_string()),
-            "Recipe should have skip condition 'true'"
+            recipe.build.skip,
+            "Recipe with `skip: true` should have skip evaluated to true"
+        );
+    }
+
+    #[test]
+    fn test_noarch_should_not_override_target_platform_for_skip() {
+        // When building a noarch package on a native platform (e.g., linux-64),
+        // the skip condition `target_platform == "noarch"` should evaluate to false
+        // because the target_platform should remain the build platform, not "noarch".
+        // Skip conditions are evaluated eagerly during recipe evaluation, before
+        // the variant gets the noarch target_platform override.
+        use crate::stage0::parse_recipe_from_source;
+
+        let recipe_yaml = r#"
+schema_version: 1
+package:
+  name: skip
+  version: "1.0.0"
+build:
+  number: 0
+  skip: target_platform == "noarch"
+  noarch: generic
+"#;
+
+        let stage0_recipe = parse_recipe_from_source(recipe_yaml).unwrap();
+        let stage0 = Stage0Recipe::SingleOutput(Box::new(stage0_recipe));
+
+        let variant_config = VariantConfig::default();
+        let config =
+            RenderConfig::new().with_target_platform(rattler_conda_types::Platform::Linux64);
+
+        let rendered =
+            render_recipe_with_variant_config(&stage0, &variant_config, config).unwrap();
+
+        assert_eq!(rendered.len(), 1, "Recipe should be returned from rendering");
+
+        // Skip should be false: target_platform is "linux-64" (the build platform),
+        // not "noarch", when the skip condition is evaluated
+        assert!(
+            !rendered[0].recipe.build.skip,
+            "Recipe with `skip: target_platform == \"noarch\"` should NOT be skipped \
+             when building on linux-64"
         );
     }
 }

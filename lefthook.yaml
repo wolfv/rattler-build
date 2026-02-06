@@ -79,6 +79,9 @@ pre-push:
     - name: cargo-clippy
       glob: "*.rs"
       run: pixi {run} cargo-clippy
+    - name: check-native-tls
+      glob: "Cargo.{toml,lock}"
+      run: ./scripts/check-native-tls.sh
     - name: py-rattler-build-cargo-clippy
       glob: "py-rattler-build/rust/**/*.rs"
       run: pixi {run-py} lint-rust

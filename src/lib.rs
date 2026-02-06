@@ -49,17 +49,15 @@ use std::{
 
 use build::{WorkingDirectoryBehavior, run_build, skip_existing};
 use console_utils::LoggingOutputHandler;
-use dialoguer::Confirm;
 use dunce::canonicalize;
 use fs_err as fs;
 use futures::FutureExt;
 use miette::{Context, IntoDiagnostic};
 use opt::*;
 use package_test::TestConfiguration;
-use rattler_build_jinja::JinjaConfig;
 use rattler_build_recipe::{
     stage0,
-    stage1::{EvaluationContext, Recipe, TestType},
+    stage1::{Recipe, TestType},
     variant_render::{RenderConfig, render_recipe_with_variant_config},
 };
 use rattler_build_variant_config::VariantConfig;
@@ -298,6 +296,7 @@ pub fn get_tool_config(
         .with_error_prefix_in_binary(build_data.error_prefix_in_binary)
         .with_allow_symlinks_on_windows(build_data.allow_symlinks_on_windows)
         .with_allow_absolute_license_paths(build_data.allow_absolute_license_paths)
+        .with_io_concurrency_limit(Some(build_data.io_concurrency_limit))
         .with_zstd_repodata_enabled(build_data.common.repodata_settings.zstd_enabled)
         .with_bz2_repodata_enabled(build_data.common.repodata_settings.bz2_enabled)
         .with_sharded_repodata_enabled(build_data.common.repodata_settings.sharded_enabled)
@@ -427,10 +426,10 @@ pub async fn get_build_output(
 
     tracing::info!("Found {} variants\n", outputs_and_variants.len());
     for discovered_output in &outputs_and_variants {
-        let skipped = if !discovered_output.recipe.build().skip.is_empty() {
+        let skipped = if discovered_output.recipe.build().skip {
             console::style(" (skipped)").red().to_string()
         } else {
-            "".to_string()
+            String::new()
         };
 
         tracing::info!(
@@ -468,33 +467,13 @@ pub async fn get_build_output(
         let recipe = &discovered_output.recipe;
 
         // Check if this build should be skipped based on skip conditions
-        if !recipe.build().skip.is_empty() {
-            // Create JinjaConfig with the target platform and variant
-            let jinja_config = JinjaConfig {
-                target_platform: discovered_output.target_platform,
-                build_platform: build_data.build_platform,
-                host_platform: build_data.host_platform,
-                variant: discovered_output.used_vars.clone(),
-                ..Default::default()
-            };
-
-            // Convert variant to IndexMap<String, Variable> for EvaluationContext
-            let variables = discovered_output
-                .used_vars
-                .iter()
-                .map(|(k, v)| (k.0.clone(), v.clone()))
-                .collect();
-
-            let context = EvaluationContext::with_variables_and_config(variables, jinja_config);
-
-            if stage0::evaluate::is_skipped(&recipe.build().skip, &context) {
-                tracing::info!(
-                    "Skipping {} {} - skip conditions evaluated to true",
-                    recipe.package().name().as_normalized(),
-                    recipe.package().version()
-                );
-                continue;
-            }
+        if recipe.build().skip {
+            tracing::info!(
+                "Skipping {} {} - skip conditions evaluated to true",
+                recipe.package().name().as_normalized(),
+                recipe.package().version()
+            );
+            continue;
         }
 
         subpackages.insert(
@@ -1213,12 +1192,17 @@ pub async fn rebuild(
         let diffoscope_available = Command::new("diffoscope").arg("--version").output().is_ok();
 
         if diffoscope_available {
-            let confirmation = Confirm::new()
-                .with_prompt("Do you want to run diffoscope?")
-                .interact()
-                .unwrap();
+            // In interactive mode, ask the user; in CI/non-TTY, run automatically
+            let should_run = if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+                dialoguer::Confirm::new()
+                    .with_prompt("Do you want to run diffoscope?")
+                    .interact()
+                    .unwrap_or(true)
+            } else {
+                true
+            };
 
-            if confirmation {
+            if should_run {
                 let mut command = Command::new("diffoscope");
                 command
                     .arg(&result.original_path)

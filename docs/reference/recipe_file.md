@@ -936,9 +936,6 @@ tests:
 
 ### Downstream tests
 
-!!! warning
-    Downstream tests are not yet implemented in `rattler-build`.
-
 A downstream test can mention a single package that has a dependency on the package being built.
 The test will install the package and run the tests of the downstream package with our current
 package as a dependency.
@@ -1243,8 +1240,8 @@ requirements:
 
 #### The env Jinja functions
 
-You can access the current environment variables using the `env` object in
-Jinja.
+You can access the environment variables set outside the build script using the
+`env` object in Jinja.
 
 There are three functions:
 

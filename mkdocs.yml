@@ -169,6 +169,7 @@ nav:
       - Recipe file: reference/recipe_file.md
       - CLI: reference/cli.md
       - Jinja: reference/jinja.md
+      - Rattler Index: rattler_index.md
 
 plugins:
   - search
