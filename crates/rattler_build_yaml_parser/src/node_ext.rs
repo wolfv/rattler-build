@@ -452,7 +452,11 @@ impl<'a> MappingParser<'a> {
     }
 
     /// Get an optional conditional list field with a custom converter.
-    pub fn optional_list_with<T, C>(&self, field: &str, converter: &C) -> ParseResult<ConditionalList<T>>
+    pub fn optional_list_with<T, C>(
+        &self,
+        field: &str,
+        converter: &C,
+    ) -> ParseResult<ConditionalList<T>>
     where
         C: NodeConverter<T>,
     {
@@ -523,7 +527,10 @@ impl<'a> MappingParser<'a> {
                     format!("unknown field '{}'", key_str),
                     *key.span(),
                 )
-                .with_suggestion(format!("valid fields are: {}", self.valid_fields.join(", "))));
+                .with_suggestion(format!(
+                    "valid fields are: {}",
+                    self.valid_fields.join(", ")
+                )));
             }
         }
 
@@ -554,7 +561,9 @@ impl ParseMapping for MarkedMappingNode {
         C: NodeConverter<T>,
     {
         if let Some(node) = self.get(field_name) {
-            Ok(Some(parse_value_with_converter(node, field_name, converter)?))
+            Ok(Some(parse_value_with_converter(
+                node, field_name, converter,
+            )?))
         } else {
             Ok(None)
         }
@@ -745,7 +754,13 @@ config:
 "#,
         )
         .unwrap();
-        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let mapping = yaml
+            .as_mapping()
+            .unwrap()
+            .get("config")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
         let parser = MappingParser::new(mapping, "config", &["name", "count", "optional"]);
 
         let name: Option<Value<String>> = parser.optional("name").unwrap();
@@ -775,7 +790,13 @@ config:
 "#,
         )
         .unwrap();
-        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let mapping = yaml
+            .as_mapping()
+            .unwrap()
+            .get("config")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
         let parser = MappingParser::new(mapping, "config", &["items", "missing"]);
 
         let items: ConditionalList<String> = parser.optional_list("items").unwrap();
@@ -797,7 +818,13 @@ config:
 "#,
         )
         .unwrap();
-        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let mapping = yaml
+            .as_mapping()
+            .unwrap()
+            .get("config")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
         let parser = MappingParser::new(mapping, "config", &["name", "count"]);
 
         let name: Value<String> = parser.required("name").unwrap();
@@ -819,7 +846,13 @@ config:
 "#,
         )
         .unwrap();
-        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let mapping = yaml
+            .as_mapping()
+            .unwrap()
+            .get("config")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
         let parser = MappingParser::new(mapping, "config", &["name"]);
 
         // finish() should detect the unknown field
@@ -839,14 +872,22 @@ config:
 "#,
         )
         .unwrap();
-        let mapping = yaml.as_mapping().unwrap().get("config").unwrap().as_mapping().unwrap();
+        let mapping = yaml
+            .as_mapping()
+            .unwrap()
+            .get("config")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
         let parser = MappingParser::new(mapping, "config", &["special"]);
 
         // Custom parser that uppercases the value
-        let result = parser.custom("special", |node| {
-            let s = node.as_scalar().unwrap().as_str();
-            Ok(s.to_uppercase())
-        }).unwrap();
+        let result = parser
+            .custom("special", |node| {
+                let s = node.as_scalar().unwrap().as_str();
+                Ok(s.to_uppercase())
+            })
+            .unwrap();
 
         assert_eq!(result, Some("CUSTOM_VALUE".to_string()));
         parser.finish().unwrap();

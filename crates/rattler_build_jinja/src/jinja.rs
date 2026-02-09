@@ -613,7 +613,7 @@ lazy_static::lazy_static! {
     pub static ref SYNTAX_CONFIG: SyntaxConfig = SyntaxConfig::builder()
         .block_delimiters("{%", "%}")
         .variable_delimiters("${{", "}}")
-        .comment_delimiters("#{{", "}}")
+        .comment_delimiters("{#", "#}")
         .build()
         .unwrap();
 }
@@ -1194,7 +1194,11 @@ mod tests {
     fn eval_cdt_aarch64() {
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            platforms: PlatformTriple::new(Platform::LinuxAarch64, Platform::LinuxAarch64, Platform::LinuxAarch64),
+            platforms: PlatformTriple::new(
+                Platform::LinuxAarch64,
+                Platform::LinuxAarch64,
+                Platform::LinuxAarch64,
+            ),
             variant,
             ..Default::default()
         };
@@ -1222,7 +1226,11 @@ mod tests {
     fn eval_cdt_arm6() {
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            platforms: PlatformTriple::new(Platform::LinuxArmV6l, Platform::LinuxArmV6l, Platform::LinuxArmV6l),
+            platforms: PlatformTriple::new(
+                Platform::LinuxArmV6l,
+                Platform::LinuxArmV6l,
+                Platform::LinuxArmV6l,
+            ),
             variant,
             ..Default::default()
         };
@@ -1526,7 +1534,11 @@ mod tests {
         // it tracks the variable access
         let variant = BTreeMap::from_iter(vec![("cdt_name".into(), "conda".into())]);
         let options = JinjaConfig {
-            platforms: PlatformTriple::new(Platform::LinuxAarch64, Platform::LinuxAarch64, Platform::LinuxAarch64),
+            platforms: PlatformTriple::new(
+                Platform::LinuxAarch64,
+                Platform::LinuxAarch64,
+                Platform::LinuxAarch64,
+            ),
             variant,
             ..Default::default()
         };
@@ -1576,7 +1588,11 @@ mod tests {
         // it does NOT track the variable (since it wasn't actually read from the variant)
         let variant = BTreeMap::new();
         let options = JinjaConfig {
-            platforms: PlatformTriple::new(Platform::LinuxAarch64, Platform::LinuxAarch64, Platform::LinuxAarch64),
+            platforms: PlatformTriple::new(
+                Platform::LinuxAarch64,
+                Platform::LinuxAarch64,
+                Platform::LinuxAarch64,
+            ),
             variant,
             ..Default::default()
         };

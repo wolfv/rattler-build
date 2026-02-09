@@ -232,7 +232,11 @@ mod tests {
 
         // fix the platform for the snapshots
         let jinja_config = JinjaConfig {
-            platforms: PlatformTriple::new(Platform::OsxArm64, Platform::OsxArm64, Platform::OsxArm64),
+            platforms: PlatformTriple::new(
+                Platform::OsxArm64,
+                Platform::OsxArm64,
+                Platform::OsxArm64,
+            ),
             ..Default::default()
         };
 

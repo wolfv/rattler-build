@@ -305,21 +305,30 @@ fn parse_url_source(
     let parser = MappingParser::new(
         mapping,
         "url source",
-        &["url", "sha256", "md5", "file_name", "patches", "target_directory"],
+        &[
+            "url",
+            "sha256",
+            "md5",
+            "file_name",
+            "patches",
+            "target_directory",
+        ],
     );
 
     // URL can be a single value or a list
-    let url = parser.custom("url", |n| {
-        let mut urls = Vec::new();
-        if let Some(seq) = n.as_sequence() {
-            for item in seq.iter() {
-                urls.push(parse_value(item)?);
+    let url = parser
+        .custom("url", |n| {
+            let mut urls = Vec::new();
+            if let Some(seq) = n.as_sequence() {
+                for item in seq.iter() {
+                    urls.push(parse_value(item)?);
+                }
+            } else {
+                urls.push(parse_value(n)?);
             }
-        } else {
-            urls.push(parse_value(n)?);
-        }
-        Ok(urls)
-    })?.ok_or_else(|| ParseError::missing_field("url", *mapping.span()))?;
+            Ok(urls)
+        })?
+        .ok_or_else(|| ParseError::missing_field("url", *mapping.span()))?;
 
     let result = UrlSource {
         url,
@@ -356,18 +365,20 @@ fn parse_path_source(
         .optional("path")?
         .ok_or_else(|| ParseError::missing_field("path", *mapping.span()))?;
 
-    let use_gitignore = parser.custom("use_gitignore", |n| {
-        let scalar = n.as_scalar().ok_or_else(|| {
-            ParseError::expected_type("boolean", "non-scalar", get_span(n))
-        })?;
-        scalar.as_bool().ok_or_else(|| {
-            ParseError::invalid_value(
-                "use_gitignore",
-                format!("expected boolean, got '{}'", scalar.as_str()),
-                *n.span(),
-            )
-        })
-    })?.unwrap_or(true);
+    let use_gitignore = parser
+        .custom("use_gitignore", |n| {
+            let scalar = n
+                .as_scalar()
+                .ok_or_else(|| ParseError::expected_type("boolean", "non-scalar", get_span(n)))?;
+            scalar.as_bool().ok_or_else(|| {
+                ParseError::invalid_value(
+                    "use_gitignore",
+                    format!("expected boolean, got '{}'", scalar.as_str()),
+                    *n.span(),
+                )
+            })
+        })?
+        .unwrap_or(true);
 
     let result = PathSource {
         path,
@@ -377,7 +388,9 @@ fn parse_path_source(
         target_directory: parser.optional("target_directory")?,
         file_name: parser.optional("file_name")?,
         use_gitignore,
-        filter: parser.custom("filter", parse_source_filter)?.unwrap_or_default(),
+        filter: parser
+            .custom("filter", parse_source_filter)?
+            .unwrap_or_default(),
     };
 
     parser.finish()?;

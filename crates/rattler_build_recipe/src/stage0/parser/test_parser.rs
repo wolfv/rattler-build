@@ -224,22 +224,26 @@ fn parse_ruby_test(
 fn parse_commands_test(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<CommandsTest, ParseError> {
-    let parser = MappingParser::new(mapping, "commands test", &["script", "requirements", "files"]);
+    let parser = MappingParser::new(
+        mapping,
+        "commands test",
+        &["script", "requirements", "files"],
+    );
 
     let result = CommandsTest {
         script: parser
             .custom("script", crate::stage0::parser::build::parse_script)?
             .unwrap_or_default(),
         requirements: parser.custom("requirements", |n| {
-            let m = n.as_mapping().ok_or_else(|| {
-                ParseError::expected_type("mapping", "non-mapping", get_span(n))
-            })?;
+            let m = n
+                .as_mapping()
+                .ok_or_else(|| ParseError::expected_type("mapping", "non-mapping", get_span(n)))?;
             parse_commands_test_requirements(m)
         })?,
         files: parser.custom("files", |n| {
-            let m = n.as_mapping().ok_or_else(|| {
-                ParseError::expected_type("mapping", "non-mapping", get_span(n))
-            })?;
+            let m = n
+                .as_mapping()
+                .ok_or_else(|| ParseError::expected_type("mapping", "non-mapping", get_span(n)))?;
             parse_commands_test_files(m)
         })?,
     };
@@ -298,27 +302,30 @@ fn parse_package_contents_test(
 
     let result = PackageContentsTest {
         files: parser.custom("files", parse_package_contents_check_files_flexible)?,
-        site_packages: parser.custom("site_packages", parse_package_contents_check_files_flexible)?,
+        site_packages: parser
+            .custom("site_packages", parse_package_contents_check_files_flexible)?,
         bin: parser.custom("bin", parse_package_contents_check_files_flexible)?,
         lib: parser.custom("lib", parse_package_contents_check_files_flexible)?,
         include: parser.custom("include", parse_package_contents_check_files_flexible)?,
-        strict: parser.custom("strict", |n| {
-            let scalar = n.as_scalar().ok_or_else(|| {
-                ParseError::expected_type("scalar", "non-scalar", get_span(n))
-                    .with_message("Expected 'strict' to be a boolean")
-            })?;
-            let s = scalar.as_str();
-            let span = *scalar.span();
-            match s {
-                "true" | "True" | "yes" | "Yes" => Ok(true),
-                "false" | "False" | "no" | "No" => Ok(false),
-                _ => Err(ParseError::invalid_value(
-                    "strict",
-                    format!("not a valid boolean value (found '{}')", s),
-                    span,
-                )),
-            }
-        })?.unwrap_or(false),
+        strict: parser
+            .custom("strict", |n| {
+                let scalar = n.as_scalar().ok_or_else(|| {
+                    ParseError::expected_type("scalar", "non-scalar", get_span(n))
+                        .with_message("Expected 'strict' to be a boolean")
+                })?;
+                let s = scalar.as_str();
+                let span = *scalar.span();
+                match s {
+                    "true" | "True" | "yes" | "Yes" => Ok(true),
+                    "false" | "False" | "no" | "No" => Ok(false),
+                    _ => Err(ParseError::invalid_value(
+                        "strict",
+                        format!("not a valid boolean value (found '{}')", s),
+                        span,
+                    )),
+                }
+            })?
+            .unwrap_or(false),
     };
 
     parser.finish()?;
@@ -359,7 +366,11 @@ fn parse_package_contents_check_files_flexible(
 fn parse_package_contents_check_files(
     mapping: &marked_yaml::types::MarkedMappingNode,
 ) -> Result<PackageContentsCheckFiles, ParseError> {
-    let parser = MappingParser::new(mapping, "package_contents check files", &["exists", "not_exists"]);
+    let parser = MappingParser::new(
+        mapping,
+        "package_contents check files",
+        &["exists", "not_exists"],
+    );
 
     let result = PackageContentsCheckFiles {
         exists: parser.optional_list("exists")?,

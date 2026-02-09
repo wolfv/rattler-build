@@ -429,7 +429,9 @@ fn parse_build_from_mapping(mapping: &MarkedMappingNode) -> Result<Build, ParseE
         string: parser.optional("string")?,
         script: parser.custom("script", parse_script)?.unwrap_or_default(),
         noarch: parser.custom("noarch", parse_noarch)?,
-        python: parser.custom("python", parse_python_build)?.unwrap_or_default(),
+        python: parser
+            .custom("python", parse_python_build)?
+            .unwrap_or_default(),
         skip: parser
             .custom("skip", |n| Ok(parse_conditional_list_or_item(n)?.into()))?
             .unwrap_or_default(),
@@ -440,7 +442,9 @@ fn parse_build_from_mapping(mapping: &MarkedMappingNode) -> Result<Build, ParseE
                 parse_bool_value(n, "merge_build_and_host_envs")
             })?
             .unwrap_or_default(),
-        files: parser.custom("files", parse_build_files)?.unwrap_or_default(),
+        files: parser
+            .custom("files", parse_build_files)?
+            .unwrap_or_default(),
         dynamic_linking: parser
             .custom("dynamic_linking", parse_dynamic_linking)?
             .unwrap_or_default(),
@@ -604,7 +608,9 @@ fn parse_prefix_detection(node: &Node) -> Result<PrefixDetection, ParseError> {
             .custom("ignore", parse_prefix_ignore)?
             .unwrap_or_default(),
         ignore_binary_files: parser
-            .custom("ignore_binary_files", |n| parse_bool_value(n, "ignore_binary_files"))?
+            .custom("ignore_binary_files", |n| {
+                parse_bool_value(n, "ignore_binary_files")
+            })?
             .unwrap_or_default(),
     };
 
