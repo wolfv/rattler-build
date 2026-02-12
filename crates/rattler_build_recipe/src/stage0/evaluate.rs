@@ -2180,6 +2180,11 @@ impl Evaluate for Stage0GitSource {
                 .as_ref()
                 .map(|v| evaluate_string_value(v, context))
                 .transpose()?,
+            expected_signers: self
+                .expected_signers
+                .iter()
+                .map(|v| evaluate_string_value(v, context))
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 }

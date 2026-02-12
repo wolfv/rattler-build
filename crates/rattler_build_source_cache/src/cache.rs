@@ -124,6 +124,28 @@ impl SourceCache {
             tracing::info!("Verified expected commit: {}", expected);
         }
 
+        // Verify GPG signature if expected signers are specified
+        if !source.expected_signers.is_empty() {
+            #[cfg(feature = "git-signing")]
+            {
+                let signers = source.expected_signers.clone();
+                let repo = repo_path.clone();
+                let hash = commit_hash.clone();
+                let signer = tokio::task::spawn_blocking(move || {
+                    rattler_git::signing::verify_commit_signature(&repo, &hash, &signers)
+                })
+                .await
+                .map_err(|e| CacheError::Git(format!("signing task failed: {}", e)))?
+                .map_err(CacheError::SignatureVerification)?;
+                tracing::info!("Verified commit signature by: {}", signer);
+            }
+
+            #[cfg(not(feature = "git-signing"))]
+            {
+                return Err(CacheError::SigningNotEnabled);
+            }
+        }
+
         // Handle LFS if needed
         if source.lfs {
             self.git_lfs_pull(&repo_path).await?;

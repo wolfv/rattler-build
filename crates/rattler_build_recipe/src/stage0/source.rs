@@ -74,6 +74,10 @@ pub struct GitSource {
     /// Optionally an expected commit hash to verify after checkout
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_commit: Option<Value<String>>,
+
+    /// Optionally a list of expected GPG signers (GitHub usernames) to verify the commit signature
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_signers: Vec<Value<String>>,
 }
 
 /// A url source (usually a tar.gz or tar.bz2 archive)
@@ -234,6 +238,7 @@ impl GitSource {
             target_directory,
             lfs,
             expected_commit,
+            expected_signers,
         } = self;
 
         let mut vars = Vec::new();
@@ -260,6 +265,9 @@ impl GitSource {
         }
         if let Some(ec) = expected_commit {
             vars.extend(ec.used_variables());
+        }
+        for signer in expected_signers {
+            vars.extend(signer.used_variables());
         }
         vars.sort();
         vars.dedup();

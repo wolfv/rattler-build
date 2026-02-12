@@ -273,6 +273,7 @@ fn parse_git_source(
     let mut target_directory = None;
     let mut lfs = None;
     let mut expected_commit = None;
+    let mut expected_signers = Vec::new();
 
     for (key_node, value_node) in mapping.iter() {
         let key = key_node.as_str();
@@ -306,6 +307,15 @@ fn parse_git_source(
             "expected_commit" => {
                 expected_commit = Some(parse_value(value_node)?);
             }
+            "expected_signers" => {
+                if let Some(seq) = value_node.as_sequence() {
+                    for item in seq.iter() {
+                        expected_signers.push(parse_value(item)?);
+                    }
+                } else {
+                    expected_signers.push(parse_value(value_node)?);
+                }
+            }
             _ => {
                 return Err(ParseError::invalid_value(
                     "git source",
@@ -313,7 +323,7 @@ fn parse_git_source(
                     *key_node.span(),
                 )
                 .with_suggestion(
-                    "Valid fields are: git, rev, tag, branch, depth, patches, target_directory, lfs, expected_commit",
+                    "Valid fields are: git, rev, tag, branch, depth, patches, target_directory, lfs, expected_commit, expected_signers",
                 ));
             }
         }
@@ -346,6 +356,7 @@ fn parse_git_source(
         target_directory,
         lfs,
         expected_commit,
+        expected_signers,
     })
 }
 

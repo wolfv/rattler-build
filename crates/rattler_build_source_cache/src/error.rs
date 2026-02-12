@@ -53,6 +53,13 @@ pub enum CacheError {
     #[error("WalkDir error: {0}")]
     WalkDir(#[from] walkdir::Error),
 
+    #[error("GPG signature verification failed: {0}")]
+    #[cfg(feature = "git-signing")]
+    SignatureVerification(#[from] rattler_git::signing::SigningError),
+
+    #[error("expected_signers requires the 'git-signing' feature to be enabled")]
+    SigningNotEnabled,
+
     #[error("{0}")]
     Other(String),
 }

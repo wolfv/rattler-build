@@ -77,6 +77,9 @@ pub struct GitSource {
     pub lfs: bool,
     /// Optionally an expected commit hash to verify after checkout
     pub expected_commit: Option<String>,
+    /// Optionally a list of expected GPG signers (GitHub usernames) to verify the commit signature
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_signers: Vec<String>,
 }
 
 impl GitSource {
@@ -98,16 +101,18 @@ impl GitSource {
             depth,
             lfs,
             expected_commit: None,
+            expected_signers: Vec::new(),
         }
     }
 
-    /// Create a new GitSource with expected commit
+    /// Create a new GitSource with expected commit and signers
     pub fn with_expected_commit(
         url: url::Url,
         reference: RattlerGitReference,
         depth: Option<i32>,
         lfs: bool,
         expected_commit: Option<String>,
+        expected_signers: Vec<String>,
     ) -> Self {
         Self {
             url,
@@ -115,6 +120,7 @@ impl GitSource {
             depth,
             lfs,
             expected_commit,
+            expected_signers,
         }
     }
 }

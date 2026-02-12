@@ -9,6 +9,8 @@ pub mod credentials;
 pub mod git;
 pub mod resolver;
 pub mod sha;
+#[cfg(feature = "signing")]
+pub mod signing;
 pub mod source;
 pub mod url;
 

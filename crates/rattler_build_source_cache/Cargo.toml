@@ -10,6 +10,7 @@ description = "Source cache management for rattler-build"
 [features]
 native-tls = ["rattler_build_networking/native-tls"]
 rustls-tls = ["rattler_build_networking/rustls-tls"]
+git-signing = ["rattler_git/signing"]
 
 [dependencies]
 async-trait = { workspace = true }
