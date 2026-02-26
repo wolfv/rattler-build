@@ -7,6 +7,7 @@ edition = "2024"
 license = "BSD-3-Clause"
 readme = "README.md"
 description = "A fast CLI tool to build conda packages on Windows, macOS and Linux"
+publish = false
 documentation = "https://prefix-dev.github.io/rattler-build"
 default-run = "rattler-build"
 rust-version = "1.89.0"
