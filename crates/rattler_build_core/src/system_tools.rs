@@ -219,26 +219,28 @@ impl Serialize for SystemTools {
         let used_tools = self.used_tools.lock().unwrap();
         let is_rattler_build = self.build_tool.name == "rattler-build";
 
-        // rattler-build: only the flat key; other tools: structured build_tool key + flat compat key
-        let extra_entries = if is_rattler_build { 1 } else { 2 };
-        let mut map = serializer.serialize_map(Some(used_tools.len() + extra_entries))?;
+        let mut map = serializer.serialize_map(Some(used_tools.len() + 1))?;
 
-        if !is_rattler_build {
-            // Emit the structured build_tool key for non-rattler-build tools
+        if is_rattler_build {
+            // Legacy: all flat keys in alphabetical order
+            let mut ordered = BTreeMap::new();
+            ordered.insert(self.build_tool.name.clone(), self.build_tool.version.clone());
+            for (tool, version) in used_tools.iter() {
+                ordered.insert(tool.to_string(), version.clone());
+            }
+            for (key, version) in &ordered {
+                map.serialize_entry(key, version)?;
+            }
+        } else {
+            // New: structured build_tool key only (no flat compat key), then system tools
             map.serialize_entry("build_tool", &self.build_tool)?;
-        }
-
-        // Collect all flat entries into a BTreeMap for deterministic ordering
-        let mut ordered_tools = BTreeMap::new();
-        ordered_tools.insert(
-            self.build_tool.name.clone(),
-            self.build_tool.version.clone(),
-        );
-        for (tool, version) in used_tools.iter() {
-            ordered_tools.insert(tool.to_string(), version.clone());
-        }
-        for (key, version) in &ordered_tools {
-            map.serialize_entry(key, version)?;
+            let mut ordered = BTreeMap::new();
+            for (tool, version) in used_tools.iter() {
+                ordered.insert(tool.to_string(), version.clone());
+            }
+            for (key, version) in &ordered {
+                map.serialize_entry(key, version)?;
+            }
         }
 
         map.end()

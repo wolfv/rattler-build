@@ -7,6 +7,5 @@ expression: json
     "name": "pixi-build-rust",
     "version": "0.1.0"
   },
-  "patchelf": "1.0.0",
-  "pixi-build-rust": "0.1.0"
+  "patchelf": "1.0.0"
 }
