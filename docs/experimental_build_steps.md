@@ -84,11 +84,15 @@ Metadata runs arbitrary recipe code during both builds and render-only
 operations. Do not render an untrusted recipe with experimental features
 enabled.
 
-The recipe is initially parsed and rendered to discover outputs and variants
-before this phase. Consequently, a metadata step cannot change package identity,
-sources, outputs, or variant selection. URL, Git, and path sources are fetched,
-verified, extracted, and patched first, so metadata can inspect them through
-`SRC_DIR`. `RECIPE_DIR` remains available for recipe-local support files.
+The recipe receives a bootstrap render to discover its outputs before this
+phase. URL, Git, and path sources are then fetched, verified, extracted, and
+patched, so metadata can inspect them through `SRC_DIR`. `RECIPE_DIR` remains
+available for recipe-local support files. After metadata has generated its
+requirements, rattler-build performs the final variant expansion. A free
+metadata-generated dependency such as `python` or `zlib` therefore expands over
+all values configured for that key (including `zip_keys` behavior) before any
+final dependency solve. Metadata still cannot change package identity, sources,
+or the output list.
 
 The metadata step uses the normal step fields `run`, `uses`, `with`,
 `interpreter`, `env`, `cwd`, and `requirements.build` / `requirements.host`.
@@ -117,16 +121,45 @@ Requirement fields are append-only. `build.steps` and `build.script` can be set
 or extended, and `build.python.entry_points` can be appended for generated
 Python console scripts. The normal post-build mutable fields can also be changed.
 Arrays and objects use JSON syntax. Emitted dependency values must be concrete
-match specs; selectors and variant expansion have already happened. If a
-metadata-generated build/host dependency has a configured variant (for example
-`python`), the initial recipe must reference that variant or pass
-`${{ python }}` through the metadata provider's `with`; rattler-build rejects a
-late dependency that would silently bypass variant expansion. Generated script
-content still receives the normal late-bound build-script rendering. The output
-content is included in the package variant hash. After a successful metadata
-step, rattler-build prints the effective `build`, `requirements`, and `about`
-metadata as YAML before resolving emitted step providers and dependencies, so
-the dynamic result is visible without logging unrelated source or context data.
+match specs; selectors are not re-evaluated, but free dependency names drive the
+final variant expansion. Generated script content still receives normal
+late-bound build-script rendering. The output content and final variant values
+are included in the package hash.
+
+Every metadata-generated build step must have a unique `name`; a `uses`
+reference supplies its default name when omitted. Recipe-authored
+`build.steps` with the same name replace the generated default; additional
+recipe-authored named steps are appended. This lets a backend provide a useful
+pipeline while a consumer replaces only the part it understands better:
+
+```yaml
+build:
+  metadata:
+    uses: cmake:metadata
+    with:
+      cmake_args: [-DBUILD_SHARED_LIBS=ON]
+  steps:
+    - name: configure # replaces the generated `configure` step
+      run: cmake -S . -B build -DMY_PROJECT_OPTION=ON
+```
+
+Metadata providers declare and validate `inputs` exactly like normal reusable
+steps, and consumers pass typed values through `build.metadata.with`. Unknown,
+missing required, and incorrectly typed inputs fail during preprocessing.
+
+After a successful metadata step, rattler-build prints the effective `build`,
+`requirements`, and `about` metadata as YAML. It then prints a compact table of
+the final named steps for every expanded variant, including each step's provider
+and dependencies. During execution, each section is announced as
+`Running build step: NAME`. To inspect all of this without solving or building
+the final package, use:
+
+```console
+rattler-build build --recipe . --render-only --experimental
+```
+
+Metadata itself still executes during render-only operations because its output
+is required to determine the final variants and recipe.
 
 For example, a project can keep conda-specific dependency declarations in
 `pyproject.toml` and generate its build pipeline:

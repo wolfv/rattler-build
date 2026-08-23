@@ -158,7 +158,15 @@ def main() -> None:
             stream.write(emit("build.python.entry_points", entry_points, append=True))
         provider_version = os.environ["RATTLER_BUILD_PROVIDER_VERSION"]
         stream.write(
-            emit("build.steps", [{"uses": f"python:build@=={provider_version}"}])
+            emit(
+                "build.steps",
+                [
+                    {
+                        "name": "python-build",
+                        "uses": f"python:build@=={provider_version}",
+                    }
+                ],
+            )
         )
         for field in ["summary", "license", "homepage", "repository", "documentation"]:
             if value := metadata.get(field):

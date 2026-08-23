@@ -18,6 +18,73 @@ use crate::{
     tool_configuration::Configuration, types::Directories,
 };
 
+fn merge_authored_steps(generated: &mut BuildPlan, authored: &BuildPlan) -> miette::Result<()> {
+    if generated == authored {
+        return Ok(());
+    }
+    let BuildPlan::Steps(generated_steps) = generated else {
+        return Ok(());
+    };
+    let mut generated_names = std::collections::HashSet::new();
+    for step in generated_steps.iter_mut() {
+        if step.name.is_none() {
+            step.name.clone_from(&step.uses);
+        }
+        let name = step.name.as_deref().ok_or_else(|| {
+            miette::miette!("build.metadata generated an unnamed build step; generated steps must have names so recipes can override them")
+        })?;
+        if !generated_names.insert(name) {
+            return Err(miette::miette!(
+                "build.metadata generated duplicate build step name `{name}`"
+            ));
+        }
+    }
+    let BuildPlan::Steps(authored_steps) = authored else {
+        return Ok(());
+    };
+
+    let mut authored_by_name = HashMap::new();
+    for step in authored_steps {
+        let name = step.name.as_deref().ok_or_else(|| {
+            miette::miette!(
+                "recipe-authored build steps must have names when build.metadata generates build.steps"
+            )
+        })?;
+        if authored_by_name.insert(name, step).is_some() {
+            return Err(miette::miette!(
+                "duplicate recipe-authored build step name `{name}`"
+            ));
+        }
+    }
+
+    let mut merged = Vec::with_capacity(generated_steps.len() + authored_steps.len());
+    let mut consumed = std::collections::HashSet::new();
+    for step in std::mem::take(generated_steps) {
+        let name = step
+            .name
+            .as_deref()
+            .expect("generated step names were validated above");
+        if let Some(authored_step) = authored_by_name.get(name) {
+            merged.push((*authored_step).clone());
+            consumed.insert(name.to_string());
+        } else {
+            merged.push(step);
+        }
+    }
+    merged.extend(
+        authored_steps
+            .iter()
+            .filter(|step| {
+                step.name
+                    .as_ref()
+                    .is_none_or(|name| !consumed.contains(name))
+            })
+            .cloned(),
+    );
+    *generated_steps = merged;
+    Ok(())
+}
+
 fn apply_metadata_hash(output: &mut Output, contents: &[u8]) {
     let fingerprint = hex::encode(Sha256::digest(contents));
     let old_hash = output.build_configuration.hash.clone();
@@ -228,7 +295,9 @@ pub async fn run_metadata_step(
     let contents = fs_err::read(&output_file)
         .into_diagnostic()
         .wrap_err("failed to read metadata-step output")?;
+    let authored_plan = output.recipe.build.plan.clone();
     crate::recipe_patch::apply_metadata_output(&mut output.recipe, &output_file)?;
+    merge_authored_steps(&mut output.recipe.build.plan, &authored_plan)?;
     apply_metadata_hash(output, &contents);
 
     // Show the effective mutable metadata before provider preprocessing and

@@ -29,6 +29,16 @@ build:
           output.write(f"requirements.build.append {json.dumps(dynamic['build'])}\n")
           output.write(f"requirements.host.append {json.dumps(dynamic['host'])}\n")
           output.write(f"build.steps {json.dumps([install])}\n")
+  steps:
+    # A consumer can replace a generated default by using the same step name.
+    - name: install
+      interpreter: python
+      run: |
+        import os
+        from pathlib import Path
+        destination = Path(os.environ["PREFIX"]) / "share" / "metadata-step-example"
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "generated.txt").write_text("recipe override ran\n")
 
 about:
   summary: Build and host requirements plus build steps generated before solving

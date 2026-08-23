@@ -1,8 +1,15 @@
+inputs:
+  backend_args:
+    type: list
+    default: []
+
 steps:
   - name: python-metadata
     requirements:
       build: [python >=3.11, packaging]
     interpreter: python
+    env:
+      RATTLER_BUILD_BACKEND_ARGS: ${{ inputs.backend_args | join(' ') }}
     run: |
       import os
       from pathlib import Path

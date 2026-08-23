@@ -36,7 +36,7 @@ pub use rattler_build_recipe::stage1::{HashInfo, HashInput};
 pub use rattler_build_types::NormalizedKey;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
@@ -173,6 +173,132 @@ fn find_variants(
         outputs: recipes,
         recipe_name,
     })
+}
+
+/// Expand variant keys introduced by generated metadata.
+///
+/// The initial render provides the concrete recipe needed to run the metadata
+/// backend. Once that backend has added requirements, compute the complete
+/// configured matrix and update each output's hash. This deliberately happens
+/// before normal reusable-step preprocessing and dependency solving.
+fn expand_generated_metadata_variants(
+    output: Output,
+    variant_config: &VariantConfig,
+) -> miette::Result<Vec<Output>> {
+    if output.recipe.build.metadata.is_none() {
+        return Ok(vec![output]);
+    }
+    let noarch = output.recipe.build.noarch.unwrap_or_default();
+    let participates_in_final_matrix = |key: &NormalizedKey| {
+        let normalized = key.normalize();
+        variant_config.get(key).is_some()
+            && !matches!(
+                normalized.as_str(),
+                "build_platform" | "host_platform" | "target_platform"
+            )
+            && !(noarch.is_python() && normalized == "python")
+    };
+    let mut used_keys = output
+        .build_configuration
+        .variant
+        .keys()
+        .filter(|key| participates_in_final_matrix(key))
+        .cloned()
+        .collect::<HashSet<_>>();
+    for name in output.recipe.requirements.free_specs() {
+        let key = NormalizedKey::from(name.as_normalized());
+        if participates_in_final_matrix(&key) {
+            used_keys.insert(key);
+        }
+    }
+    if let Some(steps) = output.recipe.build.plan.steps() {
+        for dependency in steps.iter().flat_map(|step| {
+            step.requirements
+                .build
+                .iter()
+                .chain(&step.requirements.host)
+        }) {
+            if let Some(name) = dependency.name() {
+                let key = NormalizedKey::from(name.as_normalized());
+                if participates_in_final_matrix(&key) {
+                    used_keys.insert(key);
+                }
+            }
+        }
+    }
+
+    let combinations = variant_config.combinations(&used_keys).into_diagnostic()?;
+    if combinations.is_empty() {
+        return Ok(vec![output]);
+    }
+
+    let configured_existing = output
+        .build_configuration
+        .variant
+        .iter()
+        .filter(|(key, _)| used_keys.contains(*key))
+        .collect::<Vec<_>>();
+    let old_hash = output.build_configuration.hash.clone();
+    let old_build_string = output.recipe.build.string.as_resolved().map(str::to_string);
+    let mut expanded = Vec::new();
+    for combination in combinations {
+        if configured_existing
+            .iter()
+            .any(|(key, value)| combination.get(*key) != Some(*value))
+        {
+            continue;
+        }
+        let mut candidate = output.clone();
+        for key in &used_keys {
+            candidate.build_configuration.variant.remove(key);
+        }
+        candidate.build_configuration.variant.extend(combination);
+        let new_hash = HashInfo::from_variant(&candidate.build_configuration.variant, &noarch);
+        if let Some(build_string) = &old_build_string
+            && new_hash != old_hash
+        {
+            let updated = build_string.replace(&old_hash.to_string(), &new_hash.to_string());
+            candidate.recipe.build.string = BuildString::resolved(if updated == *build_string {
+                format!("{build_string}_{new_hash}")
+            } else {
+                updated
+            });
+        }
+        candidate.build_configuration.hash = new_hash;
+        if !expanded.iter().any(|existing: &Output| {
+            existing.recipe.package.name == candidate.recipe.package.name
+                && existing.recipe.build.string == candidate.recipe.build.string
+        }) {
+            expanded.push(candidate);
+        }
+    }
+    Ok(expanded)
+}
+
+fn show_effective_build_steps(output: &Output) {
+    let Some(steps) = output.recipe.build.plan.steps() else {
+        return;
+    };
+    let mut table = comfy_table::Table::new();
+    table
+        .load_style(comfy_table::presets::UTF8_FULL_CONDENSED.with_rounded_corners())
+        .set_header(["Step", "Source", "Depends on"]);
+    for (index, step) in steps.iter().enumerate() {
+        table.add_row([
+            step.name.clone().unwrap_or_else(|| format!("step {index}")),
+            step.uses.clone().unwrap_or_else(|| "inline".to_string()),
+            if step.depends_on.is_empty() {
+                "-".to_string()
+            } else {
+                step.depends_on.join(", ")
+            },
+        ]);
+    }
+    tracing::info!(
+        "\nEffective build steps for {}:\n{}\n",
+        output.identifier(),
+        table
+    );
 }
 
 /// Returns the recipe path.
@@ -495,7 +621,10 @@ pub async fn get_build_output(
             "reusable build steps in multi-output recipes are not yet supported because provider requirements must participate in subpackage variant and pin resolution"
         ));
     }
-    tracing::info!("Found {} variants\n", outputs_and_variants.len());
+    tracing::info!(
+        "Found {} bootstrap variants before build.metadata\n",
+        outputs_and_variants.len()
+    );
     drop(enter);
 
     let mut subpackages = BTreeMap::new();
@@ -538,7 +667,7 @@ pub async fn get_build_output(
         // Use the global build name for outputs that inherit from staging caches
         // This ensures staging caches and their dependent packages share the same build directory
         // Otherwise, use the output's own name for the build directory
-        let mut build_name = if recipe.inherits_from.is_some() {
+        let build_name = if recipe.inherits_from.is_some() {
             global_build_name.clone()
         } else {
             recipe.package().name().as_normalized().to_string()
@@ -681,93 +810,96 @@ pub async fn get_build_output(
                 .into_diagnostic()?;
         }
         rattler_build_core::metadata_step::run_metadata_step(&mut output, tool_config).await?;
-        if output.recipe.build.metadata.is_some() {
-            rattler_build_core::step_provider::validate_late_variant_dependencies(
-                "build.metadata",
-                output
+
+        // Metadata is deliberately generated before the final matrix. A backend
+        // can introduce a free build/host dependency (for example `python`) and
+        // every configured value must become a real output variant.
+        for mut output in expand_generated_metadata_variants(output, &variant_config)? {
+            let mut final_build_name = build_name.clone();
+            if is_multi_output_recipe
+                && output
                     .recipe
-                    .requirements
                     .build
-                    .iter()
-                    .chain(&output.recipe.requirements.host),
-                &output,
-                &configured_variant_keys,
-            )?;
-        }
-        if is_multi_output_recipe
-            && output
-                .recipe
-                .build
-                .plan
-                .steps()
-                .is_some_and(|steps| steps.iter().any(|step| step.uses.is_some()))
-        {
-            return Err(miette::miette!(
-                "reusable build steps in multi-output recipes are not yet supported because provider requirements must participate in subpackage variant and pin resolution"
-            ));
-        }
+                    .plan
+                    .steps()
+                    .is_some_and(|steps| steps.iter().any(|step| step.uses.is_some()))
+            {
+                return Err(miette::miette!(
+                    "reusable build steps in multi-output recipes are not yet supported because provider requirements must participate in subpackage variant and pin resolution"
+                ));
+            }
 
-        // Metadata can add or replace `build.steps`, so resolve the final DAG only
-        // after the metadata phase and before provider/dependency resolution.
-        let (inherit_parent_build, inherit_parent_host) =
-            select_build_steps(&mut output.recipe, build_data.selected_steps.as_deref())?;
-        if build_data.selected_steps.is_some() && (!inherit_parent_build || !inherit_parent_host) {
-            let step_group = build_data
-                .selected_steps
-                .as_deref()
-                .unwrap_or_default()
-                .join("-")
-                .chars()
-                .map(|character| {
-                    if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                        character
+            // Metadata can add or replace `build.steps`, so resolve the final DAG only
+            // after metadata generation and variant expansion, before provider/dependency resolution.
+            let (inherit_parent_build, inherit_parent_host) =
+                select_build_steps(&mut output.recipe, build_data.selected_steps.as_deref())?;
+            if build_data.selected_steps.is_some()
+                && (!inherit_parent_build || !inherit_parent_host)
+            {
+                let step_group = build_data
+                    .selected_steps
+                    .as_deref()
+                    .unwrap_or_default()
+                    .join("-")
+                    .chars()
+                    .map(|character| {
+                        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                            character
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>();
+                final_build_name.push_str(&format!(
+                    "-steps-{step_group}{}{}",
+                    if !inherit_parent_build {
+                        "-no-build"
                     } else {
-                        '_'
-                    }
-                })
-                .collect::<String>();
-            build_name.push_str(&format!(
-                "-steps-{step_group}{}{}",
-                if !inherit_parent_build {
-                    "-no-build"
-                } else {
-                    ""
-                },
-                if !inherit_parent_host { "-no-host" } else { "" },
-            ));
-            output.build_configuration.directories = Directories::builder(
-                &build_name,
-                recipe_path,
-                &output_dir,
-                &timestamp,
-                Platform::current(),
-            )
-            .no_build_id(build_data.no_build_id)
-            .merge_build_and_host(output.recipe.build().merge_build_and_host_envs)
-            .skip_directory_creation(build_data.render_only)
-            .build()
-            .into_diagnostic()?;
-            output.build_configuration.directories.source_dir = build_data.local_source_dir.clone();
-        }
+                        ""
+                    },
+                    if !inherit_parent_host { "-no-host" } else { "" },
+                ));
+                output.build_configuration.directories = Directories::builder(
+                    &final_build_name,
+                    recipe_path,
+                    &output_dir,
+                    &timestamp,
+                    Platform::current(),
+                )
+                .no_build_id(build_data.no_build_id)
+                .merge_build_and_host(output.recipe.build().merge_build_and_host_envs)
+                .skip_directory_creation(build_data.render_only)
+                .build()
+                .into_diagnostic()?;
+                output.build_configuration.directories.source_dir =
+                    build_data.local_source_dir.clone();
+            }
 
-        rattler_build_core::step_provider::preprocess_reusable_steps(
-            &mut output,
-            tool_config,
-            &mut step_provider_resolver,
-            &configured_variant_keys,
-        )
-        .await?;
-        subpackages.insert(
-            output.name().clone(),
-            PackageIdentifier {
-                name: output.name().clone(),
-                version: output.recipe.package().version().clone(),
-                build_string: output.build_string().into_owned(),
-            },
-        );
-        output.build_configuration.subpackages = subpackages.clone();
-        outputs.push(output);
+            rattler_build_core::step_provider::preprocess_reusable_steps(
+                &mut output,
+                tool_config,
+                &mut step_provider_resolver,
+                &configured_variant_keys,
+            )
+            .await?;
+            show_effective_build_steps(&output);
+            subpackages.insert(
+                output.name().clone(),
+                PackageIdentifier {
+                    name: output.name().clone(),
+                    version: output.recipe.package().version().clone(),
+                    build_string: output.build_string().into_owned(),
+                },
+            );
+            output.build_configuration.subpackages = subpackages.clone();
+            outputs.push(output);
+        }
     }
+
+    tracing::info!(
+        "Found {} final variants after build.metadata\n",
+        outputs.len()
+    );
 
     for output in &outputs {
         let skipped = if output.recipe.build().skip {

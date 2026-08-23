@@ -47,7 +47,7 @@ requirements.run.append ["python >=3.8.0","pygments >=2.13.0,<3","markdown-it-py
 about.summary "Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal"
 about.license "MIT"
 about.license_file.include.append "LICENSE"
-build.steps [{"uses":"python:build@==0.1.0"}]
+build.steps [{"name":"python-build","uses":"python:build@==0.1.0"}]
 ```
 
 ## Run the complete example locally
@@ -115,6 +115,11 @@ etc/rattler-build/steps/python/
 ├── build.yaml
 └── python_metadata_backend.py
 ```
+
+The local metadata provider declares a typed `backend_args` list input. Consumers
+can pass backend-specific arguments through `build.metadata.with`; metadata
+inputs are rendered and validated in the same way as inputs to normal reusable
+steps.
 
 The metadata wrapper receives `SRC_DIR`, `RECIPE_DIR`, `PKG_NAME`,
 `PKG_VERSION`, `RATTLER_BUILD_PROVIDER_PREFIX`, and
