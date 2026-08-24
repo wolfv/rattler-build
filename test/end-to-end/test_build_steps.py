@@ -80,6 +80,120 @@ def test_metadata_dependencies_expand_variants_after_generation(
     )
 
 
+def test_generated_provider_requirements_expand_metadata_variants(
+    rattler_build: RattlerBuild, tmp_path: Path
+):
+    """Requirements hidden in a generated provider are included in the matrix."""
+    recipe_dir = tmp_path / "generated-provider-variant"
+    recipe_dir.mkdir()
+    (recipe_dir / "provider.yaml").write_text(
+        """steps:
+  - name: compile
+    requirements:
+      build: [zlib]
+    run: echo compiled
+"""
+    )
+    (recipe_dir / "recipe.yaml").write_text(
+        """schema_version: 1
+package:
+  name: generated-provider-variant
+  version: 1.0.0
+build:
+  metadata:
+    requirements:
+      build: [python]
+    interpreter: python
+    run: |
+      import json
+      import os
+      with open(os.environ["OUTPUT_FILE"], "w") as output:
+          output.write("build.steps " + json.dumps([{"uses": "provider.yaml"}]) + "\\n")
+          output.write('build.variant.use_keys.append ["libpng"]\\n')
+"""
+    )
+    variant_config = tmp_path / "provider-variants.yaml"
+    variant_config.write_text(
+        """zlib:
+  - 1.2
+  - 1.3
+libpng:
+  - 1.6.42
+  - 1.6.43
+zip_keys:
+  - [zlib, libpng]
+"""
+    )
+
+    rendered = rattler_build.render(
+        recipe_dir,
+        tmp_path / "output",
+        variant_config=variant_config,
+        extra_args=["--experimental"],
+    )
+
+    assert len(rendered) == 2
+    assert {
+        (
+            output["build_configuration"]["variant"]["zlib"],
+            output["build_configuration"]["variant"]["libpng"],
+        )
+        for output in rendered
+    } == {("1.2", "1.6.42"), ("1.3", "1.6.43")}
+    assert all(
+        output["recipe"]["build"]["steps"][0]["resolved"]["steps"][0]["name"]
+        == "compile"
+        for output in rendered
+    )
+
+
+def test_metadata_rejects_new_variant_keys_in_multi_output_graphs(
+    rattler_build: RattlerBuild, tmp_path: Path
+):
+    """Late matrix growth must not leave already rendered subpackage pins stale."""
+    recipe_dir = tmp_path / "metadata-multi-output"
+    recipe_dir.mkdir()
+    (recipe_dir / "recipe.yaml").write_text(
+        """schema_version: 1
+recipe:
+  name: metadata-multi-output
+  version: 1.0.0
+build:
+  metadata:
+    requirements:
+      build: [python]
+    interpreter: python
+    run: |
+      import os
+      with open(os.environ["OUTPUT_FILE"], "w") as output:
+          output.write('requirements.host.append ["zlib"]\\n')
+outputs:
+  - package:
+      name: metadata-multi-output-child
+"""
+    )
+    variant_config = tmp_path / "multi-output-variants.yaml"
+    variant_config.write_text("zlib:\n  - 1.2\n  - 1.3\n")
+
+    result = rattler_build(
+        "build",
+        "--recipe",
+        str(recipe_dir),
+        "--variant-config",
+        str(variant_config),
+        "--output-dir",
+        str(tmp_path / "output"),
+        "--render-only",
+        "--experimental",
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "introduces variant key `zlib` in a multi-output recipe" in result.stderr
+    assert "cannot safely recompute subpackage pins yet" in result.stderr
+
+
 def test_metadata_requires_output_file(rattler_build: RattlerBuild, tmp_path: Path):
     """A successful command that forgets the metadata protocol is an error."""
     recipe = tmp_path / "missing-output" / "recipe.yaml"
@@ -170,6 +284,7 @@ def test_run_metadata_uses_external_source_tree(
     )
 
     assert "Generated metadata after build.metadata:" in output
+    assert "# Final variant: metadata-step-example-1.0.0-" in output
     assert "Effective build steps for metadata-step-example" in output
     assert str(source) in output
     assert "- zlib" not in output

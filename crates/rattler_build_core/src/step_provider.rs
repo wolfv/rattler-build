@@ -292,7 +292,7 @@ fn apply_provider_hash(output: &mut Output, fingerprints: &[String]) {
         &output.recipe.build.noarch.unwrap_or_default(),
     );
     if let Some(build_string) = output.recipe.build.string.as_resolved() {
-        let updated = build_string.replace(&old_hash.to_string(), &new_hash.to_string());
+        let updated = build_string.replacen(&old_hash.to_string(), &new_hash.to_string(), 1);
         let updated = if updated == build_string {
             format!("{build_string}_{}", new_hash)
         } else {
@@ -544,6 +544,7 @@ pub async fn preprocess_reusable_steps(
     tool_configuration: &Configuration,
     resolver: &mut StepProviderResolver,
     configured_variant_keys: &BTreeSet<NormalizedKey>,
+    variants_expand_after_preprocessing: bool,
 ) -> miette::Result<()> {
     let references = match output.recipe.build.plan.steps() {
         Some(steps) if steps.iter().any(|step| step.uses.is_some()) => steps
@@ -600,16 +601,18 @@ pub async fn preprocess_reusable_steps(
                     "reusable step `{reference}` changes requirements.inherit; inheritance must be configured on the referencing recipe step"
                 ));
             }
-            validate_late_variant_dependencies(
-                &format!("reusable step `{reference}`"),
-                nested
-                    .requirements
-                    .build
-                    .iter()
-                    .chain(&nested.requirements.host),
-                output,
-                configured_variant_keys,
-            )?;
+            if !variants_expand_after_preprocessing {
+                validate_late_variant_dependencies(
+                    &format!("reusable step `{reference}`"),
+                    nested
+                        .requirements
+                        .build
+                        .iter()
+                        .chain(&nested.requirements.host),
+                    output,
+                    configured_variant_keys,
+                )?;
+            }
             build_requirements.extend(nested.requirements.build);
             host_requirements.extend(nested.requirements.host);
         }

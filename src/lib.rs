@@ -179,19 +179,30 @@ fn find_variants(
 ///
 /// The initial render provides the concrete recipe needed to run the metadata
 /// backend. Once that backend has added requirements, compute the complete
-/// configured matrix and update each output's hash. This deliberately happens
-/// before normal reusable-step preprocessing and dependency solving.
+/// configured matrix and update each output's hash. Generated reusable-step
+/// providers are preprocessed first so their requirements participate too; the
+/// final package dependency solve still happens afterward.
 fn expand_generated_metadata_variants(
     output: Output,
     variant_config: &VariantConfig,
+    is_multi_output_recipe: bool,
 ) -> miette::Result<Vec<Output>> {
     if output.recipe.build.metadata.is_none() {
         return Ok(vec![output]);
     }
     let noarch = output.recipe.build.noarch.unwrap_or_default();
+    let ignored_keys = output
+        .recipe
+        .build
+        .variant
+        .ignore_keys
+        .iter()
+        .map(|key| NormalizedKey::from(key.as_str()))
+        .collect::<HashSet<_>>();
     let participates_in_final_matrix = |key: &NormalizedKey| {
         let normalized = key.normalize();
-        variant_config.get(key).is_some()
+        !ignored_keys.contains(key)
+            && variant_config.get(key).is_some()
             && !matches!(
                 normalized.as_str(),
                 "build_platform" | "host_platform" | "target_platform"
@@ -211,19 +222,31 @@ fn expand_generated_metadata_variants(
             used_keys.insert(key);
         }
     }
+    for name in &output.recipe.build.variant.use_keys {
+        let key = NormalizedKey::from(name.as_str());
+        if participates_in_final_matrix(&key) {
+            used_keys.insert(key);
+        }
+    }
     if let Some(steps) = output.recipe.build.plan.steps() {
-        for dependency in steps.iter().flat_map(|step| {
-            step.requirements
-                .build
-                .iter()
-                .chain(&step.requirements.host)
-        }) {
-            if let Some(name) = dependency.name() {
-                let key = NormalizedKey::from(name.as_normalized());
-                if participates_in_final_matrix(&key) {
-                    used_keys.insert(key);
-                }
+        for name in steps.iter().flat_map(|step| step.requirements.free_specs()) {
+            let key = NormalizedKey::from(name.as_normalized());
+            if participates_in_final_matrix(&key) {
+                used_keys.insert(key);
             }
+        }
+    }
+
+    if is_multi_output_recipe {
+        let introduced_key = used_keys
+            .iter()
+            .filter(|key| !output.build_configuration.variant.contains_key(*key))
+            .map(NormalizedKey::normalize)
+            .min();
+        if let Some(key) = introduced_key {
+            return Err(miette::miette!(
+                "build.metadata introduces variant key `{key}` in a multi-output recipe; late variant expansion cannot safely recompute subpackage pins yet"
+            ));
         }
     }
 
@@ -257,7 +280,7 @@ fn expand_generated_metadata_variants(
         if let Some(build_string) = &old_build_string
             && new_hash != old_hash
         {
-            let updated = build_string.replace(&old_hash.to_string(), &new_hash.to_string());
+            let updated = build_string.replacen(&old_hash.to_string(), &new_hash.to_string(), 1);
             candidate.recipe.build.string = BuildString::resolved(if updated == *build_string {
                 format!("{build_string}_{new_hash}")
             } else {
@@ -265,12 +288,24 @@ fn expand_generated_metadata_variants(
             });
         }
         candidate.build_configuration.hash = new_hash;
-        if !expanded.iter().any(|existing: &Output| {
+        if let Some(existing) = expanded.iter().find(|existing: &&Output| {
             existing.recipe.package.name == candidate.recipe.package.name
                 && existing.recipe.build.string == candidate.recipe.build.string
         }) {
-            expanded.push(candidate);
+            if existing.build_configuration.variant == candidate.build_configuration.variant {
+                continue;
+            }
+            return Err(miette::miette!(
+                "build.metadata variant expansion produced duplicate package identifier `{}` for distinct variants",
+                candidate.identifier()
+            ));
         }
+        expanded.push(candidate);
+    }
+    if expanded.is_empty() {
+        return Err(miette::miette!(
+            "build.metadata variant expansion produced no combination compatible with the bootstrap variant"
+        ));
     }
     Ok(expanded)
 }
@@ -284,15 +319,37 @@ fn show_effective_build_steps(output: &Output) {
         .load_style(comfy_table::presets::UTF8_FULL_CONDENSED.with_rounded_corners())
         .set_header(["Step", "Source", "Depends on"]);
     for (index, step) in steps.iter().enumerate() {
+        let outer_name = step.name.clone().unwrap_or_else(|| format!("step {index}"));
+        let source = step.uses.clone().unwrap_or_else(|| "inline".to_string());
         table.add_row([
-            step.name.clone().unwrap_or_else(|| format!("step {index}")),
-            step.uses.clone().unwrap_or_else(|| "inline".to_string()),
+            outer_name.clone(),
+            source.clone(),
             if step.depends_on.is_empty() {
                 "-".to_string()
             } else {
                 step.depends_on.join(", ")
             },
         ]);
+        if let Some(resolved) = &step.resolved
+            && let Ok(selected) =
+                rattler_build_recipe::stage1::BuildPlan::Steps(resolved.steps.clone())
+                    .select_steps(None)
+        {
+            for (nested_index, nested) in selected.into_iter().enumerate() {
+                let nested_name = nested
+                    .name
+                    .unwrap_or_else(|| format!("step {nested_index}"));
+                table.add_row([
+                    format!("  {outer_name}/{nested_name}"),
+                    source.clone(),
+                    if nested.depends_on.is_empty() {
+                        "-".to_string()
+                    } else {
+                        nested.depends_on.join(", ")
+                    },
+                ]);
+            }
+        }
     }
     tracing::info!(
         "\nEffective build steps for {}:\n{}\n",
@@ -811,28 +868,41 @@ pub async fn get_build_output(
         }
         rattler_build_core::metadata_step::run_metadata_step(&mut output, tool_config).await?;
 
-        // Metadata is deliberately generated before the final matrix. A backend
-        // can introduce a free build/host dependency (for example `python`) and
-        // every configured value must become a real output variant.
-        for mut output in expand_generated_metadata_variants(output, &variant_config)? {
-            let mut final_build_name = build_name.clone();
-            if is_multi_output_recipe
-                && output
-                    .recipe
-                    .build
-                    .plan
-                    .steps()
-                    .is_some_and(|steps| steps.iter().any(|step| step.uses.is_some()))
-            {
-                return Err(miette::miette!(
-                    "reusable build steps in multi-output recipes are not yet supported because provider requirements must participate in subpackage variant and pin resolution"
-                ));
-            }
+        if is_multi_output_recipe
+            && output
+                .recipe
+                .build
+                .plan
+                .steps()
+                .is_some_and(|steps| steps.iter().any(|step| step.uses.is_some()))
+        {
+            return Err(miette::miette!(
+                "reusable build steps in multi-output recipes are not yet supported because provider requirements must participate in subpackage variant and pin resolution"
+            ));
+        }
 
-            // Metadata can add or replace `build.steps`, so resolve the final DAG only
-            // after metadata generation and variant expansion, before provider/dependency resolution.
-            let (inherit_parent_build, inherit_parent_host) =
-                select_build_steps(&mut output.recipe, build_data.selected_steps.as_deref())?;
+        // Metadata can add or replace `build.steps`, so resolve the final DAG
+        // before provider preprocessing. Provider requirements must be visible
+        // to the final variant expansion as well.
+        let (inherit_parent_build, inherit_parent_host) =
+            select_build_steps(&mut output.recipe, build_data.selected_steps.as_deref())?;
+        let variants_expand_after_preprocessing = output.recipe.build.metadata.is_some();
+        rattler_build_core::step_provider::preprocess_reusable_steps(
+            &mut output,
+            tool_config,
+            &mut step_provider_resolver,
+            &configured_variant_keys,
+            variants_expand_after_preprocessing,
+        )
+        .await?;
+
+        // Metadata is deliberately generated before the final matrix. A backend
+        // or resolved provider can introduce a free build/host dependency and
+        // every configured value must become a real output variant.
+        for mut output in
+            expand_generated_metadata_variants(output, &variant_config, is_multi_output_recipe)?
+        {
+            let mut final_build_name = build_name.clone();
             if build_data.selected_steps.is_some()
                 && (!inherit_parent_build || !inherit_parent_host)
             {
@@ -875,13 +945,15 @@ pub async fn get_build_output(
                     build_data.local_source_dir.clone();
             }
 
-            rattler_build_core::step_provider::preprocess_reusable_steps(
-                &mut output,
-                tool_config,
-                &mut step_provider_resolver,
-                &configured_variant_keys,
-            )
-            .await?;
+            if output.recipe.build.metadata.is_some() {
+                let generated_yaml =
+                    rattler_build_core::metadata_step::generated_metadata_yaml(&output)?;
+                tracing::info!(
+                    "Generated metadata after build.metadata:\n# Final variant: {}\n{}",
+                    output.identifier(),
+                    generated_yaml.trim_end()
+                );
+            }
             show_effective_build_steps(&output);
             subpackages.insert(
                 output.name().clone(),

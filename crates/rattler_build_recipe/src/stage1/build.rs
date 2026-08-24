@@ -230,6 +230,18 @@ pub struct StepRequirements {
     pub inherit: StepRequirementsInheritance,
 }
 
+impl StepRequirements {
+    /// Return unpinned build and host dependencies that can introduce variants.
+    pub fn free_specs(&self) -> Vec<rattler_conda_types::PackageName> {
+        super::requirements::Requirements {
+            build: self.build.clone(),
+            host: self.host.clone(),
+            ..Default::default()
+        }
+        .free_specs()
+    }
+}
+
 /// Parent recipe environment inheritance for an evaluated step.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StepRequirementsInheritance {
@@ -1092,6 +1104,19 @@ mod tests {
         let build: Build = serde_yaml::from_str("prefix_detection: {}\n").unwrap();
         assert_eq!(build.prefix_detection.ignore, AllOrGlobVec::All(false));
         assert!(build.prefix_detection.is_default());
+    }
+
+    #[test]
+    fn step_requirements_only_report_unpinned_specs_as_variant_keys() {
+        let requirements: StepRequirements =
+            serde_yaml::from_str("build: [zlib, 'cmake >=3.25']\nhost: [libpng, 'openssl 3.*']\n")
+                .unwrap();
+        let names = requirements
+            .free_specs()
+            .into_iter()
+            .map(|name| name.as_normalized().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["zlib", "libpng"]);
     }
 
     #[test]

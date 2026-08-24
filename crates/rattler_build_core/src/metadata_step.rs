@@ -25,31 +25,43 @@ fn merge_authored_steps(generated: &mut BuildPlan, authored: &BuildPlan) -> miet
     let BuildPlan::Steps(generated_steps) = generated else {
         return Ok(());
     };
+    let authored_steps = match authored {
+        BuildPlan::Steps(steps) => steps.as_slice(),
+        BuildPlan::Script(_) => &[],
+    };
+
+    // `build.steps.append` applies to the already rendered recipe, so the
+    // resulting list begins with the authored steps. Strip that unchanged
+    // prefix before merging, otherwise an appended generated override would be
+    // mistaken for a duplicate of the authored step it is intended to replace.
+    let appended_to_authored = generated_steps.starts_with(authored_steps);
+    let mut metadata_steps = if appended_to_authored {
+        generated_steps.drain(..authored_steps.len());
+        std::mem::take(generated_steps)
+    } else {
+        std::mem::take(generated_steps)
+    };
+
     let mut generated_names = std::collections::HashSet::new();
-    for step in generated_steps.iter_mut() {
+    for step in &mut metadata_steps {
         if step.name.is_none() {
             step.name.clone_from(&step.uses);
         }
         let name = step.name.as_deref().ok_or_else(|| {
             miette::miette!("build.metadata generated an unnamed build step; generated steps must have names so recipes can override them")
         })?;
-        if !generated_names.insert(name) {
+        if !generated_names.insert(name.to_string()) {
             return Err(miette::miette!(
                 "build.metadata generated duplicate build step name `{name}`"
             ));
         }
     }
-    let BuildPlan::Steps(authored_steps) = authored else {
-        return Ok(());
-    };
 
     let mut authored_by_name = HashMap::new();
     for step in authored_steps {
-        let name = step.name.as_deref().ok_or_else(|| {
-            miette::miette!(
-                "recipe-authored build steps must have names when build.metadata generates build.steps"
-            )
-        })?;
+        let Some(name) = step.name.as_deref() else {
+            continue;
+        };
         if authored_by_name.insert(name, step).is_some() {
             return Err(miette::miette!(
                 "duplicate recipe-authored build step name `{name}`"
@@ -57,9 +69,20 @@ fn merge_authored_steps(generated: &mut BuildPlan, authored: &BuildPlan) -> miet
         }
     }
 
-    let mut merged = Vec::with_capacity(generated_steps.len() + authored_steps.len());
+    if appended_to_authored {
+        let mut merged = authored_steps.to_vec();
+        merged.extend(metadata_steps.into_iter().filter(|step| {
+            step.name
+                .as_ref()
+                .is_none_or(|name| !authored_by_name.contains_key(name.as_str()))
+        }));
+        *generated_steps = merged;
+        return Ok(());
+    }
+
+    let mut merged = Vec::with_capacity(metadata_steps.len() + authored_steps.len());
     let mut consumed = std::collections::HashSet::new();
-    for step in std::mem::take(generated_steps) {
+    for step in metadata_steps {
         let name = step
             .name
             .as_deref()
@@ -97,7 +120,7 @@ fn apply_metadata_hash(output: &mut Output, contents: &[u8]) {
         &output.recipe.build.noarch.unwrap_or_default(),
     );
     if let Some(build_string) = output.recipe.build.string.as_resolved() {
-        let updated = build_string.replace(&old_hash.to_string(), &new_hash.to_string());
+        let updated = build_string.replacen(&old_hash.to_string(), &new_hash.to_string(), 1);
         let updated = if updated == build_string {
             format!("{build_string}_{new_hash}")
         } else {
@@ -106,6 +129,26 @@ fn apply_metadata_hash(output: &mut Output, contents: &[u8]) {
         output.recipe.build.string = BuildString::resolved(updated);
     }
     output.build_configuration.hash = new_hash;
+}
+
+/// Serialize the mutable recipe sections after metadata and provider processing.
+pub fn generated_metadata_yaml(output: &Output) -> miette::Result<String> {
+    #[derive(serde::Serialize)]
+    struct GeneratedMetadata<'a> {
+        build: &'a rattler_build_recipe::stage1::Build,
+        requirements: &'a Requirements,
+        about: &'a rattler_build_recipe::stage1::About,
+    }
+
+    let mut generated_recipe = output.recipe.clone();
+    generated_recipe.build.metadata = None;
+    serde_yaml::to_string(&GeneratedMetadata {
+        build: &generated_recipe.build,
+        requirements: &generated_recipe.requirements,
+        about: &generated_recipe.about,
+    })
+    .into_diagnostic()
+    .wrap_err("failed to serialize generated recipe metadata")
 }
 
 /// Run `build.metadata` in a bootstrap environment, then apply its output before
@@ -300,30 +343,6 @@ pub async fn run_metadata_step(
     merge_authored_steps(&mut output.recipe.build.plan, &authored_plan)?;
     apply_metadata_hash(output, &contents);
 
-    // Show the effective mutable metadata before provider preprocessing and
-    // dependency solving. Do not print package sources, context, or tests:
-    // unlike these generated fields, they may contain credentials or other
-    // unrelated recipe data.
-    #[derive(serde::Serialize)]
-    struct GeneratedMetadata<'a> {
-        build: &'a rattler_build_recipe::stage1::Build,
-        requirements: &'a Requirements,
-        about: &'a rattler_build_recipe::stage1::About,
-    }
-    let mut generated_recipe = output.recipe.clone();
-    generated_recipe.build.metadata = None;
-    let generated_yaml = serde_yaml::to_string(&GeneratedMetadata {
-        build: &generated_recipe.build,
-        requirements: &generated_recipe.requirements,
-        about: &generated_recipe.about,
-    })
-    .into_diagnostic()
-    .wrap_err("failed to serialize generated recipe metadata")?;
-    tracing::info!(
-        "Generated metadata after build.metadata:\n{}",
-        generated_yaml.trim_end()
-    );
-
     // Keep portable provider provenance, but do not serialize this machine's
     // absolute provider cache path into the rendered recipe stored in packages.
     if let Some(metadata) = &mut output.recipe.build.metadata {
@@ -336,4 +355,61 @@ pub async fn run_metadata_step(
     // Keep the bootstrap output alive until execution has completely finished.
     drop(bootstrap);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rattler_build_recipe::stage1::build::{Step, StepRun};
+
+    fn step(name: Option<&str>, command: &str) -> Step {
+        Step {
+            name: name.map(str::to_string),
+            run: StepRun::Command(command.to_string()),
+            ..Step::default()
+        }
+    }
+
+    #[test]
+    fn authored_steps_replace_generated_names_and_allow_unnamed_additions() {
+        let authored_install = step(Some("install"), "authored install");
+        let unnamed = step(None, "authored cleanup");
+        let authored = BuildPlan::Steps(vec![authored_install.clone(), unnamed.clone()]);
+        let mut generated = BuildPlan::Steps(vec![
+            step(Some("configure"), "generated configure"),
+            step(Some("install"), "generated install"),
+        ]);
+
+        merge_authored_steps(&mut generated, &authored).unwrap();
+
+        assert_eq!(
+            generated,
+            BuildPlan::Steps(vec![
+                step(Some("configure"), "generated configure"),
+                authored_install,
+                unnamed,
+            ])
+        );
+    }
+
+    #[test]
+    fn appended_generated_steps_preserve_authored_order_and_do_not_duplicate_overrides() {
+        let authored_configure = step(Some("configure"), "authored configure");
+        let authored = BuildPlan::Steps(vec![authored_configure.clone()]);
+        let mut generated = BuildPlan::Steps(vec![
+            authored_configure.clone(),
+            step(Some("configure"), "generated configure"),
+            step(Some("install"), "generated install"),
+        ]);
+
+        merge_authored_steps(&mut generated, &authored).unwrap();
+
+        assert_eq!(
+            generated,
+            BuildPlan::Steps(vec![
+                authored_configure,
+                step(Some("install"), "generated install"),
+            ])
+        );
+    }
 }

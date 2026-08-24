@@ -507,10 +507,9 @@ impl Output {
         let dependency_identity =
             serde_json::to_vec(&self.finalized_dependencies).map_err(std::io::Error::other)?;
         for (section_index, section) in exec_args.sections.iter().cloned().enumerate() {
-            tracing::info!(
-                "Running build step: {}",
-                section.label.as_deref().unwrap_or("unnamed")
-            );
+            if let Some(label) = &section.label {
+                tracing::info!("Running build step: {label}");
+            }
             let cache_path = section
                 .env
                 .get(crate::consts::RATTLER_BUILD_STEP_CACHE)

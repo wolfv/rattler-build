@@ -88,11 +88,14 @@ The recipe receives a bootstrap render to discover its outputs before this
 phase. URL, Git, and path sources are then fetched, verified, extracted, and
 patched, so metadata can inspect them through `SRC_DIR`. `RECIPE_DIR` remains
 available for recipe-local support files. After metadata has generated its
-requirements, rattler-build performs the final variant expansion. A free
-metadata-generated dependency such as `python` or `zlib` therefore expands over
-all values configured for that key (including `zip_keys` behavior) before any
-final dependency solve. Metadata still cannot change package identity, sources,
-or the output list.
+requirements, rattler-build resolves generated reusable-step providers and then
+performs the final variant expansion. A free dependency from metadata or a
+resolved provider, such as `python` or `zlib`, therefore expands over all values
+configured for that key (including `zip_keys` behavior) before any final
+dependency solve. Metadata still cannot change package identity, sources, or the
+output list. In multi-output recipes, metadata cannot introduce a new variant
+key yet because that would require recomputing the output graph and subpackage
+pins.
 
 The metadata step uses the normal step fields `run`, `uses`, `with`,
 `interpreter`, `env`, `cwd`, and `requirements.build` / `requirements.host`.
@@ -119,8 +122,10 @@ about.repository https://github.com/example/project
 
 Requirement fields are append-only. `build.steps` and `build.script` can be set
 or extended, and `build.python.entry_points` can be appended for generated
-Python console scripts. The normal post-build mutable fields can also be changed.
-Arrays and objects use JSON syntax. Emitted dependency values must be concrete
+Python console scripts. Backends that introduce variants not discoverable from
+a free dependency name (for example compiler variants) can append explicit keys
+to `build.variant.use_keys`. The normal post-build mutable fields can also be
+changed. Arrays and objects use JSON syntax. Emitted dependency values must be concrete
 match specs; selectors are not re-evaluated, but free dependency names drive the
 final variant expansion. Generated script content still receives normal
 late-bound build-script rendering. The output content and final variant values
@@ -129,7 +134,9 @@ are included in the package hash.
 Every metadata-generated build step must have a unique `name`; a `uses`
 reference supplies its default name when omitted. Recipe-authored
 `build.steps` with the same name replace the generated default; additional
-recipe-authored named steps are appended. This lets a backend provide a useful
+recipe-authored steps are appended (unnamed authored steps are allowed but
+cannot override by name). `build.steps.append` preserves authored order and adds
+non-overridden generated steps after it. This lets a backend provide a useful
 pipeline while a consumer replaces only the part it understands better:
 
 ```yaml
