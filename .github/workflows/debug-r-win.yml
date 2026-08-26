@@ -1,0 +1,53 @@
+name: Debug R crash on Windows
+
+on:
+  push:
+    branches:
+      - claude/pr-2761-green-it6ak1
+  workflow_dispatch:
+
+jobs:
+  repro:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: latest
+            spec: "r-base"
+          - name: r-4.5
+            spec: "r-base=4.5"
+          - name: r-4.4
+            spec: "r-base=4.4"
+          - name: pin-libwinpthread
+            spec: "r-base libwinpthread=12.0.0.r4.gg4f2fc60ca=h57928b3_10"
+          - name: pin-pcre2
+            spec: "r-base pcre2=10.47=hd2b5f0e_0"
+          - name: pin-libiconv
+            spec: "r-base libiconv=1.18=hc1393d2_2"
+          - name: pin-libgcc-14.3
+            spec: "r-base libgcc=14.3.0"
+          - name: pin-libcurl
+            spec: "r-base libcurl=8.21.0=hdb0ef4a_4 curl=8.21.0=hdb0ef4a_4"
+    name: ${{ matrix.name }}
+    steps:
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: t
+          create-args: >-
+            -c conda-forge
+            ${{ matrix.spec }}
+          init-shell: bash
+      - name: Show environment
+        shell: bash
+        run: micromamba list -n t
+      - name: Run Rscript
+        shell: bash
+        run: |
+          set +e
+          micromamba run -n t Rscript --version
+          echo "Rscript --version exit code: $?"
+          micromamba run -n t Rscript -e 'cat("hello from R\n"); cat(R.version.string, "\n")'
+          code=$?
+          echo "Rscript -e exit code: $code"
+          exit $code
