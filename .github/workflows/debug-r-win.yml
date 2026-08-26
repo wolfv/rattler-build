@@ -7,47 +7,27 @@ on:
   workflow_dispatch:
 
 jobs:
-  repro:
+  rattler-build-r:
+    name: rattler-build R recipes (windows)
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: latest
-            spec: "r-base"
-          - name: r-4.5
-            spec: "r-base=4.5"
-          - name: r-4.4
-            spec: "r-base=4.4"
-          - name: pin-libwinpthread
-            spec: "r-base libwinpthread=12.0.0.r4.gg4f2fc60ca=h57928b3_10"
-          - name: pin-pcre2
-            spec: "r-base pcre2=10.47=hd2b5f0e_0"
-          - name: pin-libiconv
-            spec: "r-base libiconv=1.18=hc1393d2_2"
-          - name: pin-libgcc-14.3
-            spec: "r-base libgcc=14.3.0"
-          - name: pin-libcurl
-            spec: "r-base libcurl=8.21.0=hdb0ef4a_4 curl=8.21.0=hdb0ef4a_4"
-    name: ${{ matrix.name }}
     steps:
+      - uses: actions/checkout@v4
       - uses: mamba-org/setup-micromamba@v2
         with:
-          environment-name: t
+          environment-name: rb
           create-args: >-
             -c conda-forge
-            ${{ matrix.spec }}
+            rattler-build
           init-shell: bash
-      - name: Show environment
-        shell: bash
-        run: micromamba list -n t
-      - name: Run Rscript
+      - name: Build r-test recipe (previously crashed with 0xC0000409)
         shell: bash
         run: |
-          set +e
-          micromamba run -n t Rscript --version
-          echo "Rscript --version exit code: $?"
-          micromamba run -n t Rscript -e 'cat("hello from R\n"); cat(R.version.string, "\n")'
-          code=$?
-          echo "Rscript -e exit code: $code"
-          exit $code
+          micromamba run -n rb rattler-build build \
+            --recipe test-data/recipes/r-test/recipe.yaml \
+            --output-dir "$RUNNER_TEMP/out-r-test"
+      - name: Build interpreter-detection/r recipe
+        shell: bash
+        run: |
+          micromamba run -n rb rattler-build build \
+            --recipe test-data/recipes/interpreter-detection/r/recipe.yaml \
+            --output-dir "$RUNNER_TEMP/out-interp-r"
