@@ -95,6 +95,10 @@ pub enum SubCommands {
     /// Debug a recipe build
     Debug(DebugArgs),
 
+    /// Generate sub-steps for `$RATTLER_BUILD_STEPS_FILE` (experimental)
+    #[clap(hide = true, subcommand)]
+    Steps(StepsSubCommands),
+
     /// Package-related subcommands
     #[command(subcommand)]
     Package(PackageCommands),
@@ -1481,4 +1485,19 @@ pub struct MigrateRecipeOpts {
     /// Perform a dry-run: show the migrated recipe without writing to the file.
     #[arg(long, default_value = "false")]
     pub dry_run: bool,
+}
+
+/// Generators of sub-steps (written to `$RATTLER_BUILD_STEPS_FILE`).
+#[derive(clap::Subcommand)]
+pub enum StepsSubCommands {
+    /// One sub-step per edge of a `build.ninja` (CMake, Meson, ...)
+    FromNinja {
+        /// The directory with `build.ninja`
+        build_dir: PathBuf,
+        /// Targets to build (default: the file's default targets)
+        targets: Vec<String>,
+        /// Write the steps here (default: `$RATTLER_BUILD_STEPS_FILE`, else stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }

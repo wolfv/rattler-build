@@ -7,6 +7,7 @@ pub mod build;
 pub mod bump_recipe;
 pub mod console_utils;
 pub mod debug;
+pub mod dynamic_steps;
 pub mod metadata;
 pub mod metadata_step;
 pub mod migrate_recipe;

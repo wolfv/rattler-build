@@ -803,3 +803,36 @@ def test_metadata_generated_selection_skips_unselected_action(
         "--experimental",
     )
     assert (project / "selected.txt").read_text() == "selected"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the example uses a Unix shell")
+def test_generated_substeps_run_in_parallel_and_are_cached(
+    rattler_build: RattlerBuild, tmp_path: Path
+):
+    """A step that writes `$RATTLER_BUILD_STEPS_FILE` generates sub-steps.
+
+    `steps from-ninja` turns the configured build.ninja into one sub-step per
+    edge. A second build (a new build directory) restores every sub-step from
+    the action cache; editing one source reruns its compile and the links.
+    """
+    example = Path(__file__).parent.parent.parent / "examples" / "dynamic-steps"
+    recipe = tmp_path / "recipe"
+    shutil.copytree(example, recipe)
+    env = {**os.environ, "RATTLER_BUILD_ACTION_CACHE": str(tmp_path / "actions")}
+
+    def build() -> str:
+        return rattler_build(
+            *rattler_build.build_args(
+                recipe, tmp_path / "out", extra_args=["--experimental"]
+            ),
+            stderr=STDOUT,
+            env=env,
+        )
+
+    assert "9 generated steps (9 executed, 0 cached)" in build()
+    assert "9 generated steps (0 executed, 9 cached)" in build()
+    circle = recipe / "src" / "circle.c"
+    circle.write_text(circle.read_text().replace("3.14159265358979", "3.0"))
+    out = build()
+    assert "9 generated steps (3 executed, 6 cached)" in out
+    assert "circle(1)=3.000" in out

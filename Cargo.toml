@@ -14,6 +14,7 @@ publish = true
 
 [workspace]
 members = [
+  "crates/rattler_build_ninja",
   "crates/rattler_build_core",
   "crates/rattler_build_networking",
   "crates/rattler_build_source_cache",
@@ -175,6 +176,7 @@ rattler_build_networking = { path = "crates/rattler_build_networking", version =
 rattler_build_recipe = { path = "crates/rattler_build_recipe", version = "=0.1.14" }
 rattler_build_recipe_generator = { path = "crates/rattler_build_recipe_generator", version = "=0.1.12", default-features = false }
 rattler_build_script = { path = "crates/rattler_build_script", version = "=0.2.10", default-features = false }
+rattler_build_ninja = { path = "crates/rattler_build_ninja", version = "0.1.0" }
 rattler_build_source_cache = { path = "crates/rattler_build_source_cache", version = "=0.1.11", default-features = false }
 rattler_build_types = { path = "crates/rattler_build_types", version = "=0.1.13" }
 rattler_build_variant_config = { path = "crates/rattler_build_variant_config", version = "=0.1.14" }
@@ -274,6 +276,7 @@ rattler_build_types = { workspace = true }
 rattler_build_variant_config = { workspace = true, features = ["parser"] }
 rattler_build_recipe = { workspace = true, features = ["variant-config"] }
 rattler_build_script = { workspace = true, features = ["execution"] }
+rattler_build_ninja = { workspace = true }
 rattler_build_allocator = { workspace = true, optional = true }
 
 [dev-dependencies]

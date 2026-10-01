@@ -1,0 +1,31 @@
+# Generated sub-steps (experimental): after `configure`, the `compile` step
+# turns build.ninja into one sub-step per edge. rattler-build runs them in
+# parallel and caches each by the content of its inputs, so a rebuild only
+# compiles what changed. See docs/build_steps/dynamic.md.
+package:
+  name: shapes
+  version: 1.0.0
+
+source:
+  path: .
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - cmake
+    - ninja
+
+build:
+  steps:
+    - name: configure
+      run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$PREFIX -DCMAKE_INSTALL_LIBDIR=lib
+    - name: compile
+      depends_on: [configure]
+      run: '"$RATTLER_BUILD_EXE" steps from-ninja build'
+    - name: install
+      depends_on: [compile]
+      run: cmake --install build
+
+tests:
+  - script:
+      - shapes-info

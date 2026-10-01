@@ -101,6 +101,20 @@ pub(crate) fn prepare_build_plan_execution_args(
             script
                 .env
                 .insert("RATTLER_BUILD_OUTPUT_FILE".to_string(), output_file);
+            // Generated sub-steps (see `dynamic_steps`), and the executable
+            // whose `steps from-ninja` generates them.
+            script.env.insert(
+                "RATTLER_BUILD_STEPS_FILE".to_string(),
+                crate::dynamic_steps::steps_file(&work_dir, index)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            if let Ok(exe) = std::env::current_exe() {
+                script.env.insert(
+                    "RATTLER_BUILD_EXE".to_string(),
+                    exe.to_string_lossy().into_owned(),
+                );
+            }
             let build_dir = work_dir.parent().unwrap_or(&work_dir);
             let cache_file = build_dir
                 .join(crate::consts::STEP_CACHE_DIRECTORY_NAME)
@@ -448,9 +462,38 @@ pub(crate) async fn run_prepared_build_steps(
             continue;
         }
         cache.begin()?;
+        let steps_file = crate::dynamic_steps::steps_file(output_root, section_index);
+        let _ = fs_err::remove_file(&steps_file);
+        let generated_cwd = section
+            .cwd
+            .clone()
+            .unwrap_or_else(|| exec_args.work_dir.clone());
+        let label = section.label.clone().unwrap_or_else(|| "unnamed".into());
         let mut section_args = exec_args.clone();
         section_args.sections = vec![section];
         rattler_build_script::run_script(section_args).await?;
+        // Steps the section generated run now, in parallel, before the next one.
+        if let Some(summary) = crate::dynamic_steps::run_generated(
+            &steps_file,
+            crate::dynamic_steps::Options {
+                env: process_env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+                cwd: generated_cwd,
+                cache_dir: crate::dynamic_steps::default_cache_dir(),
+                jobs: num_cpus::get(),
+            },
+        )
+        .await?
+        {
+            tracing::info!(
+                "Build step {label}: {} generated steps ({} executed, {} cached)",
+                summary.total,
+                summary.executed,
+                summary.cached
+            );
+        }
         if !allow_metadata_outputs
             && crate::recipe_patch::output_file(output_root, section_index).try_exists()?
         {

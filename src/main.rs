@@ -22,7 +22,8 @@ use rattler_build::{
     debug_recipe, extract_package, get_recipe_path, migrate_recipe,
     opt::{
         App, BuildData, BumpRecipeOpts, DebugData, DebugSubCommands, MigrateRecipeOpts,
-        PackageCommands, PublishData, RebuildData, ShellCompletion, SubCommands, TestData,
+        PackageCommands, PublishData, RebuildData, ShellCompletion, StepsSubCommands, SubCommands,
+        TestData,
     },
     publish_packages, rebuild, run_steps, run_test, show_package_info,
     tool_configuration::APP_USER_AGENT,
@@ -298,6 +299,11 @@ async fn async_main() -> miette::Result<()> {
             rattler_build::recipe_generator::generate_recipe(args).await
         }
         Some(SubCommands::Auth(args)) => rattler::cli::auth::execute(args).await.into_diagnostic(),
+        Some(SubCommands::Steps(StepsSubCommands::FromNinja {
+            build_dir,
+            targets,
+            output,
+        })) => steps_from_ninja(&build_dir, &targets, output),
         Some(SubCommands::Debug(args)) => match args.subcommand {
             DebugSubCommands::Setup(opts) => {
                 let config = load_config(app.no_config, app.config_file)?;
@@ -375,4 +381,27 @@ fn recipe_paths(
     }
 
     Ok((recipe_paths, temp_dir_opt))
+}
+
+/// `rattler-build steps from-ninja`: one generated step per ninja edge, with
+/// this process' environment (the build step's activated environment).
+fn steps_from_ninja(
+    build_dir: &std::path::Path,
+    targets: &[String],
+    output: Option<std::path::PathBuf>,
+) -> miette::Result<()> {
+    let build_dir = fs_err::canonicalize(build_dir).into_diagnostic()?;
+    let graph = rattler_build_ninja::Graph::load(&build_dir, "build.ninja")
+        .map_err(|e| miette::miette!("{e:#}"))?;
+    let file = rattler_build_ninja::StepsFile {
+        cwd: build_dir.to_string_lossy().into_owned(),
+        env: std::env::vars().collect(),
+        steps: rattler_build_ninja::steps(&graph, targets),
+    };
+    let json = serde_json::to_string_pretty(&file).into_diagnostic()?;
+    match output.or_else(|| std::env::var_os("RATTLER_BUILD_STEPS_FILE").map(Into::into)) {
+        Some(path) => fs_err::write(path, json).into_diagnostic()?,
+        None => println!("{json}"),
+    }
+    Ok(())
 }

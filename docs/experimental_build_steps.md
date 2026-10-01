@@ -68,6 +68,7 @@ must run when packaging.
 | Read sources to discover dependencies or generate a pipeline | `build.metadata` | [Pre-solve recipe generation](build_steps/metadata.md) |
 | Add licenses or runtime dependencies after compilation | A step's `OUTPUT_FILE` | [Post-build metadata](build_steps/outputs.md) |
 | Avoid rerunning unchanged work | `RATTLER_BUILD_STEP_CACHE` | [Caching and staging](build_steps/caching.md) |
+| Run a build system's commands in parallel, cached one by one | `RATTLER_BUILD_STEPS_FILE`, `steps from-ninja` | [Generated sub-steps](build_steps/dynamic.md) |
 | Update an older experimental provider | A newly versioned action package | [Migration](build_steps/migration.md) |
 
 ## How the pieces fit together

@@ -43,6 +43,7 @@ nav = [
         { "Pre-solve recipe generation" = "build_steps/metadata.md" },
         { "Post-build package metadata" = "build_steps/outputs.md" },
         { "Caching & staging" = "build_steps/caching.md" },
+        { "Generated sub-steps" = "build_steps/dynamic.md" },
         { "Migration & compatibility" = "build_steps/migration.md" },
       ] },
     ] },

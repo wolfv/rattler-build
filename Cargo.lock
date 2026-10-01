@@ -4888,6 +4888,7 @@ dependencies = [
  "rattler",
  "rattler_build_allocator",
  "rattler_build_core",
+ "rattler_build_ninja",
  "rattler_build_recipe",
  "rattler_build_recipe_generator",
  "rattler_build_script",
@@ -5061,6 +5062,15 @@ dependencies = [
  "reqwest",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "rattler_build_ninja"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs-err",
+ "serde",
 ]
 
 [[package]]
