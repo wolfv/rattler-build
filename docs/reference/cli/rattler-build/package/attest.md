@@ -8,21 +8,25 @@ Sign Sigstore attestations for already-built packages without uploading them
 
 ## Usage
 ```
-rattler-build package attest [OPTIONS] --target-channel <TARGET_CHANNEL> <PACKAGE_FILES>...
+rattler-build package attest [OPTIONS] <PACKAGE_FILES|--subject <FILENAME=SHA256>|--subjects-file <FILE>>
 ```
 
 ## Arguments
 - <a id="arg-PACKAGE_FILES" href="#arg-PACKAGE_FILES">`<PACKAGE_FILES>`</a>
 :  Package files (.conda, .tar.bz2) to attest
 <br>May be provided more than once.
-<br>**required**: `true`
 
 ## Options
+- <a id="arg---subject" href="#arg---subject">`--subject <FILENAME=SHA256>`</a>
+:  A package to attest by filename and SHA-256 digest, as `<filename>=<sha256>`. Can be repeated
+<br>May be provided more than once.
+- <a id="arg---subjects-file" href="#arg---subjects-file">`--subjects-file <FILE>`</a>
+:  JSON file listing packages to attest by filename and SHA-256 digest, as `[{"name": "<filename>", "sha256": "<hex>", "target_channel": "<url>"}]`. `target_channel` is optional and overrides `--target-channel`. Can be repeated; duplicate entries are attested once
+<br>May be provided more than once.
 - <a id="arg---target-channel" href="#arg---target-channel">`--target-channel <TARGET_CHANNEL>`</a>
-:  URL of the channel the packages are published to, recorded as `targetChannel` in the attestation (e.g. `https://prefix.dev/conda-forge`)
-<br>**required**: `true`
+:  URL of the channel the packages are published to, recorded as `targetChannel` in the attestation (e.g. `https://prefix.dev/conda-forge`). Required unless every entry of `--subjects-file` sets `target_channel`
 - <a id="arg---output-dir" href="#arg---output-dir">`--output-dir (-o) <OUTPUT_DIR>`</a>
-:  Directory to write the `<filename>.sigstore.json` bundles to (defaults to the directory of each package)
+:  Directory to write the `<filename>.sigstore.json` bundles to (defaults to the directory of each package file, or the current directory for packages given by digest)
 - <a id="arg---store-github-attestation" href="#arg---store-github-attestation">`--store-github-attestation`</a>
 :  Also store the attestations in GitHub's attestation API (requires `attestations: write` permission)
 - <a id="arg---github-repository" href="#arg---github-repository">`--github-repository <GITHUB_REPOSITORY>`</a>
@@ -32,5 +36,5 @@ rattler-build package attest [OPTIONS] --target-channel <TARGET_CHANNEL> <PACKAG
 ## Description
 Sign Sigstore attestations for already-built packages without uploading them
 
-Uses the ambient OIDC identity of the CI job (e.g. GitHub Actions with `id-token: write`) to sign a conda publish attestation (`https://schemas.conda.org/attestations-publish-1.schema.json`) for each package. The Sigstore bundle is written next to the package as `<filename>.sigstore.json` and can optionally be stored in GitHub's attestation API, so a channel can retrieve it later by the package's SHA-256 digest.
+Uses the ambient OIDC identity of the CI job (e.g. GitHub Actions with `id-token: write`) to sign a conda publish attestation (`https://schemas.conda.org/attestations-publish-1.schema.json`) for each package. Packages are given as files, or by filename and SHA-256 digest (`--subject`, `--subjects-file`) when the files are not available. The Sigstore bundle is written as `<filename>.sigstore.json` and can optionally be stored in GitHub's attestation API, so a channel can retrieve it later by the package's SHA-256 digest.
 

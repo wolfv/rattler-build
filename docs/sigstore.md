@@ -124,6 +124,43 @@ digest:
 gh api repos/OWNER/REPO/attestations/sha256:<digest>
 ```
 
+### Attesting by digest
+
+Signing only needs the package's filename and SHA-256 digest, not the file
+itself. This lets a separate CI job sign the attestations for packages that
+were built and uploaded elsewhere, so that the build job never needs
+`id-token: write`. Give the packages with `--subject`:
+
+```bash
+rattler-build package attest \
+  --subject foo-1.0-h123_0.conda=2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881 \
+  --target-channel https://prefix.dev/my-channel \
+  --store-github-attestation
+```
+
+or list them in a JSON file (digests shortened here):
+
+```json
+[
+  {"name": "foo-1.0-h123_0.conda", "sha256": "2d71...4881"},
+  {"name": "foo-1.0-h123_0.conda", "sha256": "2d71...4881",
+   "target_channel": "https://prefix.dev/my-channel/label/rc"}
+]
+```
+
+```bash
+rattler-build package attest --subjects-file uploads.json \
+  --target-channel https://prefix.dev/my-channel \
+  --store-github-attestation
+```
+
+An entry's `target_channel` overrides `--target-channel`, which is only
+required for entries without one. `--subjects-file` can be repeated, and
+entries that appear more than once are attested once. The bundles are written
+to `--output-dir`, or the current directory. When a package is attested for
+more than one channel, the bundles after the first are numbered
+(`<filename>.2.sigstore.json`, ...).
+
 The job needs `id-token: write` to sign, and `attestations: write` to store
 the bundle on GitHub. Set `--target-channel` to the channel the package will
 finally be served from, because prefix.dev checks it when the attestation is

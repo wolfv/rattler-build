@@ -1783,10 +1783,11 @@ pub fn show_package_info(args: InspectOpts) -> miette::Result<()> {
 }
 
 /// Sign Sigstore attestations for already-built packages without uploading
-/// them. Returns the paths of the written bundles.
+/// them. Packages are given as files or by filename and SHA-256 digest.
+/// Returns the paths of the written bundles.
 #[cfg(feature = "sigstore")]
 pub async fn attest_packages(args: opt::AttestOpts) -> miette::Result<Vec<PathBuf>> {
-    use rattler_upload::upload::attestation::{AttestationConfig, create_attestation};
+    use rattler_upload::upload::attestation::{AttestationConfig, AttestationSubject, Attester};
 
     let config = if args.store_github_attestation {
         let repository = args.github_repository.as_deref().ok_or_else(|| {
@@ -1822,9 +1823,13 @@ pub async fn attest_packages(args: opt::AttestOpts) -> miette::Result<Vec<PathBu
         }
     };
 
-    // Validate every input before signing anything, so a typo does not leave
-    // a partially attested set of packages behind.
-    let mut packages = Vec::with_capacity(args.package_files.len());
+    // Collect and validate every input before signing anything, so a typo
+    // does not leave a partially attested set of packages behind.
+    let missing_channel =
+        || miette::miette!("--target-channel is required for packages without a `target_channel`");
+    let digest_dir = args.output_dir.clone().unwrap_or_default();
+    let mut planned: Vec<(AttestationSubject, url::Url, PathBuf)> = Vec::new();
+
     for package_file in &args.package_files {
         let file_name = package_file
             .file_name()
@@ -1839,15 +1844,43 @@ pub async fn attest_packages(args: opt::AttestOpts) -> miette::Result<Vec<PathBu
         if !package_file.is_file() {
             miette::bail!("package file {} does not exist", package_file.display());
         }
+        let channel = args.target_channel.clone().ok_or_else(missing_channel)?;
         let bundle_dir = match &args.output_dir {
             Some(dir) => dir.clone(),
             None => package_file.parent().map(PathBuf::from).unwrap_or_default(),
         };
-        packages.push((
-            package_file,
+        planned.push((
+            AttestationSubject::from_path(package_file)?,
+            channel,
             bundle_dir.join(format!("{file_name}.sigstore.json")),
         ));
     }
+
+    let mut by_digest: Vec<(opt::AttestSubjectArg, url::Url)> = Vec::new();
+    for subject in &args.subjects {
+        let channel = args.target_channel.clone().ok_or_else(missing_channel)?;
+        by_digest.push((subject.clone(), channel));
+    }
+    for subjects_file in &args.subjects_file {
+        by_digest.extend(read_subjects_file(
+            subjects_file,
+            args.target_channel.as_ref(),
+        )?);
+    }
+    for (subject, channel) in by_digest {
+        let bundle_path = digest_dir.join(format!("{}.sigstore.json", subject.filename));
+        planned.push((
+            AttestationSubject::new(subject.filename, subject.sha256),
+            channel,
+            bundle_path,
+        ));
+    }
+
+    // A package listed twice for the same channel is attested once.
+    let mut seen = std::collections::HashSet::new();
+    planned.retain(|(subject, channel, _)| seen.insert((subject.clone(), channel.clone())));
+
+    number_duplicate_bundle_paths(&mut planned);
 
     if let Some(output_dir) = &args.output_dir {
         fs::create_dir_all(output_dir).into_diagnostic()?;
@@ -1861,13 +1894,20 @@ pub async fn attest_packages(args: opt::AttestOpts) -> miette::Result<Vec<PathBu
     )
     .build();
 
-    let mut written = Vec::with_capacity(packages.len());
-    for (package_file, bundle_path) in packages {
-        tracing::info!("Creating attestation for {}", package_file.display());
-        let bundle_json =
-            create_attestation(package_file, args.target_channel.as_str(), &config, &client)
-                .await
-                .with_context(|| format!("failed to attest {}", package_file.display()))?;
+    // Fetch the Sigstore signing configuration once for all packages.
+    let attester = Attester::production().await?;
+
+    let mut written = Vec::with_capacity(planned.len());
+    for (subject, channel, bundle_path) in planned {
+        tracing::info!(
+            "Creating attestation for {} (target channel {})",
+            subject.filename,
+            channel
+        );
+        let bundle_json = attester
+            .attest_and_store(&subject, channel.as_str(), &config, &client)
+            .await
+            .with_context(|| format!("failed to attest {}", subject.filename))?;
 
         fs::write(&bundle_path, bundle_json).into_diagnostic()?;
         tracing::info!("Wrote attestation bundle to {}", bundle_path.display());
@@ -1875,6 +1915,66 @@ pub async fn attest_packages(args: opt::AttestOpts) -> miette::Result<Vec<PathBu
     }
 
     Ok(written)
+}
+
+/// The same package can be attested for several channels (e.g. two labels).
+/// Number the bundles after the first, so that none is overwritten.
+#[cfg(feature = "sigstore")]
+fn number_duplicate_bundle_paths<S, C>(planned: &mut [(S, C, PathBuf)]) {
+    let mut seen = std::collections::HashSet::new();
+    for (_, _, bundle_path) in planned.iter_mut() {
+        let original = bundle_path.clone();
+        let stem = original
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".sigstore.json"))
+            .unwrap_or_default()
+            .to_string();
+        let mut n = 1;
+        while !seen.insert(bundle_path.clone()) {
+            n += 1;
+            *bundle_path = original.with_file_name(format!("{stem}.{n}.sigstore.json"));
+        }
+    }
+}
+
+/// Read a `--subjects-file`: a JSON list of `{"name", "sha256", "target_channel"?}`.
+#[cfg(feature = "sigstore")]
+fn read_subjects_file(
+    path: &Path,
+    default_channel: Option<&url::Url>,
+) -> miette::Result<Vec<(opt::AttestSubjectArg, url::Url)>> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Entry {
+        name: String,
+        sha256: String,
+        #[serde(default)]
+        target_channel: Option<url::Url>,
+    }
+
+    let content = fs::read_to_string(path).into_diagnostic()?;
+    let entries: Vec<Entry> = serde_json::from_str(&content)
+        .into_diagnostic()
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    entries
+        .into_iter()
+        .map(|entry| {
+            let subject = opt::AttestSubjectArg::new(&entry.name, &entry.sha256)
+                .map_err(|e| miette::miette!("{}: {e}", path.display()))?;
+            let channel = entry
+                .target_channel
+                .or_else(|| default_channel.cloned())
+                .ok_or_else(|| {
+                    miette::miette!(
+                        "{}: {} has no `target_channel` and --target-channel is not set",
+                        path.display(),
+                        entry.name
+                    )
+                })?;
+            Ok((subject, channel))
+        })
+        .collect()
 }
 
 /// Extract a conda package to a directory
@@ -1889,12 +1989,138 @@ mod attest_tests {
     fn opts(package_files: Vec<PathBuf>) -> opt::AttestOpts {
         opt::AttestOpts {
             package_files,
-            target_channel: "https://prefix.dev/conda-forge".parse().unwrap(),
+            subjects: Vec::new(),
+            subjects_file: Vec::new(),
+            target_channel: Some("https://prefix.dev/conda-forge".parse().unwrap()),
             output_dir: None,
             store_github_attestation: false,
             github_repository: None,
             github_token: None,
         }
+    }
+
+    const SHA: &str = "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881";
+
+    fn digest_opts() -> opt::AttestOpts {
+        let mut args = opts(Vec::new());
+        args.target_channel = None;
+        args
+    }
+
+    #[test]
+    fn parses_subject_arguments() {
+        use clap::Parser;
+
+        let subject: opt::AttestSubjectArg = format!("foo-1.0-h123_0.conda={SHA}").parse().unwrap();
+        assert_eq!(subject.filename, "foo-1.0-h123_0.conda");
+        assert_eq!(hex::encode(subject.sha256), SHA);
+        let prefixed: opt::AttestSubjectArg = format!("foo-1.0-h123_0.conda=sha256:{SHA}")
+            .parse()
+            .unwrap();
+        assert_eq!(prefixed, subject);
+
+        for bad in [
+            format!("foo-1.0-h123_0.zip={SHA}"),
+            format!("linux-64/foo-1.0-h123_0.conda={SHA}"),
+            "foo-1.0-h123_0.conda=abc".to_string(),
+            "foo-1.0-h123_0.conda".to_string(),
+        ] {
+            assert!(bad.parse::<opt::AttestSubjectArg>().is_err(), "{bad}");
+        }
+
+        // packages can be given by digest only, but at least one is required
+        let args = opt::AttestOpts::try_parse_from([
+            "attest",
+            "--subject",
+            &format!("foo-1.0-h123_0.conda={SHA}"),
+            "--target-channel",
+            "https://prefix.dev/conda-forge",
+        ])
+        .unwrap();
+        assert!(args.package_files.is_empty());
+        assert_eq!(args.subjects, vec![subject]);
+        assert!(opt::AttestOpts::try_parse_from(["attest"]).is_err());
+    }
+
+    #[test]
+    fn numbers_bundles_of_the_same_package() {
+        let path = PathBuf::from("foo-1.0-h123_0.conda.sigstore.json");
+        let mut planned = vec![
+            ((), (), path.clone()),
+            ((), (), path.clone()),
+            ((), (), PathBuf::from("bar-1.0-h123_0.conda.sigstore.json")),
+            ((), (), path),
+        ];
+        number_duplicate_bundle_paths(&mut planned);
+        let names: Vec<_> = planned
+            .iter()
+            .map(|(_, _, p)| p.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "foo-1.0-h123_0.conda.sigstore.json",
+                "foo-1.0-h123_0.conda.2.sigstore.json",
+                "bar-1.0-h123_0.conda.sigstore.json",
+                "foo-1.0-h123_0.conda.3.sigstore.json",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn subject_requires_a_target_channel() {
+        let mut args = digest_opts();
+        args.subjects = vec![format!("foo-1.0-h123_0.conda={SHA}").parse().unwrap()];
+        let err = attest_packages(args).await.unwrap_err();
+        assert!(err.to_string().contains("--target-channel"), "{err}");
+    }
+
+    #[test]
+    fn reads_subjects_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attest-subjects.json");
+        fs::write(
+            &path,
+            format!(
+                r#"[
+                    {{"name": "foo-1.0-h123_0.conda", "sha256": "{SHA}"}},
+                    {{"name": "bar-1.0-h123_0.conda", "sha256": "{SHA}",
+                      "target_channel": "https://conda.anaconda.org/conda-forge/label/rc"}}
+                ]"#
+            ),
+        )
+        .unwrap();
+
+        let default: url::Url = "https://conda.anaconda.org/conda-forge".parse().unwrap();
+        let subjects = read_subjects_file(&path, Some(&default)).unwrap();
+        let channels: Vec<_> = subjects
+            .iter()
+            .map(|(subject, channel)| (subject.filename.as_str(), channel.as_str()))
+            .collect();
+        assert_eq!(
+            channels,
+            [
+                (
+                    "foo-1.0-h123_0.conda",
+                    "https://conda.anaconda.org/conda-forge"
+                ),
+                (
+                    "bar-1.0-h123_0.conda",
+                    "https://conda.anaconda.org/conda-forge/label/rc"
+                ),
+            ]
+        );
+
+        // the first entry has no target channel of its own
+        let err = read_subjects_file(&path, None).unwrap_err();
+        assert!(err.to_string().contains("foo-1.0-h123_0.conda"), "{err}");
+
+        fs::write(
+            &path,
+            format!(r#"[{{"name": "foo.conda", "sha": "{SHA}"}}]"#),
+        )
+        .unwrap();
+        assert!(read_subjects_file(&path, Some(&default)).is_err());
     }
 
     #[tokio::test]

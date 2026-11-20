@@ -284,7 +284,7 @@ rattler_solve = { version = "13.0.1", default-features = false, features = [
   "resolvo",
   "serde",
 ] }
-rattler_upload = { version = "0.15.6", default-features = false }
+rattler_upload = { version = "0.16.0", default-features = false }
 rattler_virtual_packages = { version = "8.1.8", default-features = false }
 
 # Internal rattler-build crates
@@ -299,3 +299,33 @@ rattler_build_source_cache = { path = "crates/rattler_build_source_cache", versi
 rattler_build_types = { path = "crates/rattler_build_types", version = "=0.1.24" }
 rattler_build_variant_config = { path = "crates/rattler_build_variant_config", version = "=0.1.26" }
 rattler_build_yaml_parser = { path = "crates/rattler_build_yaml_parser", version = "=0.1.26" }
+
+[patch.crates-io]
+# TODO: remove once rattler_upload with `Attester` is released
+coalesced_map = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+file_url = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+path_resolver = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_boot_id = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_cache = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_conda_types = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_conda_version = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_config = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_digest = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_git = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_index = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_macros = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_menuinst = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_networking = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_package_streaming = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_prefix_guard = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_pty = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_redaction = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_repodata_gateway = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_s3 = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_shell = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_sigstore = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_solve = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_virtual_packages = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+simple_spawn_blocking = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }
+rattler_upload = { git = "https://github.com/wolfv/rattler", branch = "feat/attest-digest" }

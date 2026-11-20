@@ -298,10 +298,11 @@ pub enum PackageCommands {
     /// Uses the ambient OIDC identity of the CI job (e.g. GitHub Actions with
     /// `id-token: write`) to sign a conda publish attestation
     /// (`https://schemas.conda.org/attestations-publish-1.schema.json`) for each
-    /// package. The Sigstore bundle is written next to the package as
-    /// `<filename>.sigstore.json` and can optionally be stored in GitHub's
-    /// attestation API, so a channel can retrieve it later by the package's
-    /// SHA-256 digest.
+    /// package. Packages are given as files, or by filename and SHA-256 digest
+    /// (`--subject`, `--subjects-file`) when the files are not available. The
+    /// Sigstore bundle is written as `<filename>.sigstore.json` and can
+    /// optionally be stored in GitHub's attestation API, so a channel can
+    /// retrieve it later by the package's SHA-256 digest.
     #[cfg(feature = "sigstore")]
     Attest(AttestOpts),
 }
@@ -1448,20 +1449,44 @@ impl From<InspectOpts> for rattler_build_core::package_info::InspectOpts {
 }
 
 /// Options for the `package attest` command.
+///
+/// Packages can be given as files, or by filename and SHA-256 digest when the
+/// files are not available locally (for example in a CI job that only gets
+/// the list of uploaded packages).
 #[cfg(feature = "sigstore")]
 #[derive(Parser, Debug, Clone)]
+#[clap(group(
+    clap::ArgGroup::new("packages")
+        .required(true)
+        .multiple(true)
+        .args(["package_files", "subjects", "subjects_file"]),
+))]
 pub struct AttestOpts {
     /// Package files (.conda, .tar.bz2) to attest
-    #[arg(required = true, num_args = 1..)]
+    #[arg(num_args = 0..)]
     pub package_files: Vec<PathBuf>,
 
+    /// A package to attest by filename and SHA-256 digest, as
+    /// `<filename>=<sha256>`. Can be repeated.
+    #[arg(long = "subject", value_name = "FILENAME=SHA256")]
+    pub subjects: Vec<AttestSubjectArg>,
+
+    /// JSON file listing packages to attest by filename and SHA-256 digest,
+    /// as `[{"name": "<filename>", "sha256": "<hex>", "target_channel": "<url>"}]`.
+    /// `target_channel` is optional and overrides `--target-channel`. Can be
+    /// repeated; duplicate entries are attested once.
+    #[arg(long, value_name = "FILE")]
+    pub subjects_file: Vec<PathBuf>,
+
     /// URL of the channel the packages are published to, recorded as
-    /// `targetChannel` in the attestation (e.g. `https://prefix.dev/conda-forge`)
+    /// `targetChannel` in the attestation (e.g. `https://prefix.dev/conda-forge`).
+    /// Required unless every entry of `--subjects-file` sets `target_channel`.
     #[arg(long)]
-    pub target_channel: Url,
+    pub target_channel: Option<Url>,
 
     /// Directory to write the `<filename>.sigstore.json` bundles to
-    /// (defaults to the directory of each package)
+    /// (defaults to the directory of each package file, or the current
+    /// directory for packages given by digest)
     #[arg(short, long)]
     pub output_dir: Option<PathBuf>,
 
@@ -1477,6 +1502,50 @@ pub struct AttestOpts {
     /// GitHub token used to store the attestations
     #[arg(long, env = "GITHUB_TOKEN", hide_env_values = true, hide = true)]
     pub github_token: Option<String>,
+}
+
+/// A package identified by filename and SHA-256 digest, parsed from
+/// `<filename>=<sha256>`.
+#[cfg(feature = "sigstore")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttestSubjectArg {
+    /// The package filename
+    pub filename: String,
+    /// The SHA-256 digest of the package file
+    pub sha256: rattler_digest::Sha256Hash,
+}
+
+#[cfg(feature = "sigstore")]
+impl AttestSubjectArg {
+    /// Check the filename and parse the hex SHA-256 digest of a package.
+    pub fn new(filename: &str, sha256: &str) -> Result<Self, String> {
+        if !(filename.ends_with(".conda") || filename.ends_with(".tar.bz2"))
+            || filename.contains(['/', '\\'])
+        {
+            return Err(format!(
+                "'{filename}' is not a conda package filename (.conda or .tar.bz2)"
+            ));
+        }
+        let hex = sha256.strip_prefix("sha256:").unwrap_or(sha256);
+        let sha256 = rattler_digest::parse_digest_from_hex::<rattler_digest::Sha256>(hex)
+            .ok_or_else(|| format!("'{sha256}' is not a hex SHA-256 digest"))?;
+        Ok(Self {
+            filename: filename.to_string(),
+            sha256,
+        })
+    }
+}
+
+#[cfg(feature = "sigstore")]
+impl FromStr for AttestSubjectArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (filename, sha256) = s
+            .rsplit_once('=')
+            .ok_or_else(|| format!("expected <filename>=<sha256>, got '{s}'"))?;
+        Self::new(filename, sha256)
+    }
 }
 
 /// Options for the `package extract` command.
